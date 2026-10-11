@@ -21,6 +21,22 @@ export type DatabaseBranch = {
   updated_at?: string;
 };
 
+type ActionStep = {
+  name?: string;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+type ActionRun = {
+  id?: string;
+  branch_id?: string;
+  run_steps?: ActionStep[];
+  steps?: ActionStep[];
+  created_at?: string;
+  updated_at?: string;
+};
+
 type OrganizationProjectsResponse = {
   projects?: PlatformProject[];
   pagination?: { count?: number; limit?: number; offset?: number };
@@ -99,11 +115,10 @@ export async function ensureDatabaseBranch(parentRef: string, branchName: string
 
 export async function waitForDatabaseBranch(parentRef: string, branchName: string, timeoutMs = 180_000) {
   const started = Date.now();
-  let branch: DatabaseBranch | null = null;
 
   while (Date.now() - started < timeoutMs) {
     try {
-      branch = await getDatabaseBranch(parentRef, branchName);
+      const branch = await getDatabaseBranch(parentRef, branchName);
       if (branch.project_ref) {
         await waitForProjectHealthy(branch.project_ref, 45_000);
         return branch;
@@ -126,6 +141,31 @@ export async function mergeDatabaseBranch(branchRef: string) {
     `/v1/branches/${encodeURIComponent(branchRef)}/merge`,
     { method: "POST", body: JSON.stringify({}) },
   );
+}
+
+export async function getActionRun(parentRef: string, runId: string) {
+  return managementRequest<ActionRun>(
+    `/v1/projects/${encodeURIComponent(parentRef)}/actions/${encodeURIComponent(runId)}`,
+  );
+}
+
+export async function waitForActionRun(parentRef: string, runId: string, timeoutMs = 180_000) {
+  const started = Date.now();
+
+  while (Date.now() - started < timeoutMs) {
+    const run = await getActionRun(parentRef, runId);
+    const steps = run.run_steps || run.steps || [];
+    if (steps.length > 0) {
+      const statuses = steps.map((step) => String(step.status || "").toUpperCase());
+      const failed = statuses.find((status) => ["FAILED", "FAILURE", "ERROR", "CANCELED", "CANCELLED"].includes(status));
+      if (failed) throw new Error(`Supabase branch deployment action ${runId} failed (${failed})`);
+      const terminal = statuses.every((status) => ["SUCCESS", "SUCCEEDED", "COMPLETED", "SKIPPED"].includes(status));
+      if (terminal) return run;
+    }
+    await sleep(2500);
+  }
+
+  throw new Error(`Supabase branch deployment action ${runId} did not complete before timeout`);
 }
 
 export async function deleteDatabaseBranch(branchRef: string) {
