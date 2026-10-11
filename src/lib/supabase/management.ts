@@ -133,7 +133,9 @@ export async function waitForDatabaseBranch(parentRef: string, branchName: strin
 }
 
 export async function diffDatabaseBranch(branchRef: string) {
-  return managementRequest<unknown>(`/v1/branches/${encodeURIComponent(branchRef)}/diff?included_schemas=public&pgdelta=true`);
+  return managementRequest<string>(`/v1/branches/${encodeURIComponent(branchRef)}/diff?included_schemas=public&pgdelta=true`, {
+    headers: { Accept: "text/plain" },
+  });
 }
 
 export async function mergeDatabaseBranch(branchRef: string) {
@@ -159,7 +161,7 @@ export async function waitForActionRun(parentRef: string, runId: string, timeout
       const statuses = steps.map((step) => String(step.status || "").toUpperCase());
       const failed = statuses.find((status) => ["FAILED", "FAILURE", "ERROR", "CANCELED", "CANCELLED"].includes(status));
       if (failed) throw new Error(`Supabase branch deployment action ${runId} failed (${failed})`);
-      const terminal = statuses.every((status) => ["SUCCESS", "SUCCEEDED", "COMPLETED", "SKIPPED"].includes(status));
+      const terminal = statuses.every((status) => ["SUCCESS", "SUCCEEDED", "COMPLETED", "PASSED", "SKIPPED"].includes(status));
       if (terminal) return run;
     }
     await sleep(2500);
