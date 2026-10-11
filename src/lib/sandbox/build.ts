@@ -25,12 +25,20 @@ export type BrowserQaFinding = {
   code: string;
   message: string;
   viewport?: string;
+  route?: string;
 };
 
 export type BrowserQaResult = {
   passed: boolean;
   findings: BrowserQaFinding[];
-  viewports: Array<{ name: string; width: number; height: number; textLength: number; interactiveCount: number }>;
+  viewports: Array<{
+    name: string;
+    route: string;
+    width: number;
+    height: number;
+    textLength: number;
+    interactiveCount: number;
+  }>;
 };
 
 export function sandboxAuthConfigured() {
@@ -181,9 +189,13 @@ export async function stopPreview(sandbox: Sandbox) {
   ]);
 }
 
-export async function runBrowserQa(sandbox: Sandbox): Promise<{ result: BrowserQaResult; log: string }> {
+export async function runBrowserQa(
+  sandbox: Sandbox,
+  routes: string[] = ["/"],
+): Promise<{ result: BrowserQaResult; log: string }> {
   const qaPath = `${SANDBOX_ROOT}/.lymtless-browser-qa.cjs`;
-  await sandbox.writeFiles([{ path: qaPath, content: Buffer.from(browserQaScript(), "utf8") }]);
+  const safeRoutes = normalizeQaRoutes(routes);
+  await sandbox.writeFiles([{ path: qaPath, content: Buffer.from(browserQaScript(safeRoutes), "utf8") }]);
   const run = await runCaptured(sandbox, "node", [qaPath]);
   if (run.exitCode !== 0) throw new Error(`Browser QA runner failed: ${run.combined}`);
 
@@ -204,11 +216,26 @@ export async function lockSandboxNetwork(sandbox: Sandbox) {
   await sandbox.update({ networkPolicy: "deny-all" });
 }
 
-function browserQaScript() {
+function normalizeQaRoutes(routes: string[]) {
+  const normalized = new Set<string>(["/"]);
+  for (const candidate of routes) {
+    if (typeof candidate !== "string") continue;
+    const route = candidate.trim();
+    if (!route.startsWith("/") || route.includes(":") || route.includes("*") || route.includes("[") || route.includes("]")) continue;
+    if (!/^\/[A-Za-z0-9_/?#&=.~-]*$/.test(route)) continue;
+    normalized.add(route);
+    if (normalized.size >= 8) break;
+  }
+  return Array.from(normalized);
+}
+
+function browserQaScript(routes: string[]) {
+  const serializedRoutes = JSON.stringify(routes);
   return `
 const { chromium } = require('playwright');
 
 const target = 'http://127.0.0.1:${PREVIEW_PORT}';
+const routes = ${serializedRoutes};
 const viewports = [
   { name: 'desktop', width: 1440, height: 900 },
   { name: 'tablet', width: 768, height: 1024 },
@@ -222,76 +249,82 @@ const viewports = [
 
   try {
     for (const viewport of viewports) {
-      const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height } });
-      const page = await context.newPage();
-      const consoleErrors = [];
-      const pageErrors = [];
-      const failedRequests = [];
+      for (let routeIndex = 0; routeIndex < routes.length; routeIndex += 1) {
+        const route = routes[routeIndex];
+        const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height } });
+        const page = await context.newPage();
+        const consoleErrors = [];
+        const pageErrors = [];
+        const failedRequests = [];
 
-      page.on('console', (message) => {
-        if (message.type() === 'error') consoleErrors.push(message.text().slice(0, 1000));
-      });
-      page.on('pageerror', (error) => pageErrors.push(String(error).slice(0, 1000)));
-      page.on('requestfailed', (request) => {
-        const type = request.resourceType();
-        if (['document', 'script', 'stylesheet', 'fetch', 'xhr'].includes(type)) {
-          failedRequests.push((request.url() + ' — ' + (request.failure()?.errorText || 'failed')).slice(0, 1200));
+        page.on('console', (message) => {
+          if (message.type() === 'error') consoleErrors.push(message.text().slice(0, 1000));
+        });
+        page.on('pageerror', (error) => pageErrors.push(String(error).slice(0, 1000)));
+        page.on('requestfailed', (request) => {
+          const type = request.resourceType();
+          if (['document', 'script', 'stylesheet', 'fetch', 'xhr'].includes(type)) {
+            failedRequests.push((request.url() + ' — ' + (request.failure()?.errorText || 'failed')).slice(0, 1200));
+          }
+        });
+
+        let response;
+        try {
+          const url = new URL(route, target).toString();
+          response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          await page.waitForTimeout(900);
+        } catch (error) {
+          findings.push({ severity: 'error', code: 'navigation_failed', message: String(error).slice(0, 1200), viewport: viewport.name, route });
+          await context.close();
+          continue;
         }
-      });
 
-      let response;
-      try {
-        response = await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 20000 });
-        await page.waitForTimeout(1200);
-      } catch (error) {
-        findings.push({ severity: 'error', code: 'navigation_failed', message: String(error).slice(0, 1200), viewport: viewport.name });
+        if (!response || response.status() >= 400) {
+          findings.push({ severity: 'error', code: 'http_error', message: 'Preview returned HTTP ' + (response?.status() ?? 'no response'), viewport: viewport.name, route });
+        }
+
+        const metrics = await page.evaluate(() => {
+          const body = document.body;
+          const textLength = (body?.innerText || '').trim().length;
+          const interactiveCount = document.querySelectorAll('button,a,input,select,textarea,[role="button"]').length;
+          const brokenImages = Array.from(document.images)
+            .filter((img) => img.complete && img.naturalWidth === 0)
+            .map((img) => img.currentSrc || img.src)
+            .slice(0, 10);
+          const horizontalOverflow = document.documentElement.scrollWidth > window.innerWidth + 4;
+          const bodyHeight = body?.getBoundingClientRect().height || 0;
+          return { textLength, interactiveCount, brokenImages, horizontalOverflow, bodyHeight };
+        });
+
+        results.push({ name: viewport.name, route, width: viewport.width, height: viewport.height, textLength: metrics.textLength, interactiveCount: metrics.interactiveCount });
+
+        if (metrics.textLength < 10 && metrics.interactiveCount === 0) {
+          findings.push({ severity: 'error', code: 'blank_page', message: 'Page rendered without meaningful text or interactive UI.', viewport: viewport.name, route });
+        }
+        if (metrics.bodyHeight < 80) {
+          findings.push({ severity: 'error', code: 'collapsed_layout', message: 'Rendered body height is unexpectedly small.', viewport: viewport.name, route });
+        }
+        if (metrics.horizontalOverflow) {
+          findings.push({ severity: 'error', code: 'horizontal_overflow', message: 'Layout overflows the viewport horizontally.', viewport: viewport.name, route });
+        }
+        for (const src of metrics.brokenImages) {
+          findings.push({ severity: 'error', code: 'broken_image', message: 'Image failed to render: ' + src.slice(0, 800), viewport: viewport.name, route });
+        }
+        for (const message of pageErrors.slice(0, 10)) {
+          findings.push({ severity: 'error', code: 'page_error', message, viewport: viewport.name, route });
+        }
+        for (const message of consoleErrors.slice(0, 10)) {
+          findings.push({ severity: 'error', code: 'console_error', message, viewport: viewport.name, route });
+        }
+        for (const message of failedRequests.slice(0, 10)) {
+          findings.push({ severity: 'warning', code: 'request_failed', message, viewport: viewport.name, route });
+        }
+
+        if (routeIndex === 0) {
+          await page.screenshot({ path: '/tmp/lymtless-' + viewport.name + '.png', fullPage: true });
+        }
         await context.close();
-        continue;
       }
-
-      if (!response || response.status() >= 400) {
-        findings.push({ severity: 'error', code: 'http_error', message: 'Preview returned HTTP ' + (response?.status() ?? 'no response'), viewport: viewport.name });
-      }
-
-      const metrics = await page.evaluate(() => {
-        const body = document.body;
-        const textLength = (body?.innerText || '').trim().length;
-        const interactiveCount = document.querySelectorAll('button,a,input,select,textarea,[role="button"]').length;
-        const brokenImages = Array.from(document.images)
-          .filter((img) => img.complete && img.naturalWidth === 0)
-          .map((img) => img.currentSrc || img.src)
-          .slice(0, 10);
-        const horizontalOverflow = document.documentElement.scrollWidth > window.innerWidth + 4;
-        const bodyHeight = body?.getBoundingClientRect().height || 0;
-        return { textLength, interactiveCount, brokenImages, horizontalOverflow, bodyHeight };
-      });
-
-      results.push({ name: viewport.name, width: viewport.width, height: viewport.height, textLength: metrics.textLength, interactiveCount: metrics.interactiveCount });
-
-      if (metrics.textLength < 10 && metrics.interactiveCount === 0) {
-        findings.push({ severity: 'error', code: 'blank_page', message: 'Page rendered without meaningful text or interactive UI.', viewport: viewport.name });
-      }
-      if (metrics.bodyHeight < 80) {
-        findings.push({ severity: 'error', code: 'collapsed_layout', message: 'Rendered body height is unexpectedly small.', viewport: viewport.name });
-      }
-      if (metrics.horizontalOverflow) {
-        findings.push({ severity: 'error', code: 'horizontal_overflow', message: 'Layout overflows the viewport horizontally.', viewport: viewport.name });
-      }
-      for (const src of metrics.brokenImages) {
-        findings.push({ severity: 'error', code: 'broken_image', message: 'Image failed to render: ' + src.slice(0, 800), viewport: viewport.name });
-      }
-      for (const message of pageErrors.slice(0, 10)) {
-        findings.push({ severity: 'error', code: 'page_error', message, viewport: viewport.name });
-      }
-      for (const message of consoleErrors.slice(0, 10)) {
-        findings.push({ severity: 'error', code: 'console_error', message, viewport: viewport.name });
-      }
-      for (const message of failedRequests.slice(0, 10)) {
-        findings.push({ severity: 'warning', code: 'request_failed', message, viewport: viewport.name });
-      }
-
-      await page.screenshot({ path: '/tmp/lymtless-' + viewport.name + '.png', fullPage: true });
-      await context.close();
     }
   } finally {
     await browser.close();
@@ -300,7 +333,7 @@ const viewports = [
   const deduped = Array.from(new Map(findings.map((finding) => [JSON.stringify(finding), finding])).values());
   const result = { passed: !deduped.some((finding) => finding.severity === 'error'), findings: deduped, viewports: results };
   console.log(JSON.stringify(result));
-  process.exit(result.passed ? 0 : 0);
+  process.exit(0);
 })().catch((error) => {
   console.error(error);
   process.exit(1);

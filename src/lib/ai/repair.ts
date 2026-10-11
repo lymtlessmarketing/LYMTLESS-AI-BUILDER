@@ -2,7 +2,11 @@ import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import type { SourceFile } from "@/lib/sandbox/build";
 import { repairPatchSchema } from "@/lib/ai/schemas";
-import { QA_REPAIR_SYSTEM_PROMPT, REPAIR_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
+import {
+  QA_REPAIR_SYSTEM_PROMPT,
+  REPAIR_SYSTEM_PROMPT,
+  VISUAL_REPAIR_SYSTEM_PROMPT,
+} from "@/lib/ai/system-prompt";
 
 const MAX_CONTEXT_CHARS = 140_000;
 const ALWAYS_INCLUDE = [
@@ -54,6 +58,21 @@ export async function repairBrowserQaFailure(options: {
     systemPrompt: QA_REPAIR_SYSTEM_PROMPT,
     failureLabel: "BROWSER QA FINDINGS",
     schemaName: "browser_qa_repair_patch",
+  });
+}
+
+export async function repairVisualQaFailure(options: {
+  files: SourceFile[];
+  visualLog: string;
+  blueprint: unknown;
+}) {
+  return runRepair({
+    files: options.files,
+    failureLog: options.visualLog,
+    blueprint: options.blueprint,
+    systemPrompt: VISUAL_REPAIR_SYSTEM_PROMPT,
+    failureLabel: "VISUAL QA FINDINGS",
+    schemaName: "visual_qa_repair_patch",
   });
 }
 
