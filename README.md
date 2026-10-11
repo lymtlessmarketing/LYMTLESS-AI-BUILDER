@@ -12,9 +12,11 @@ Independent AI-powered no-code/full-code app builder foundation.
 - Dedicated Supabase project provisioning for generated apps that require database/auth/storage
 - Guarded generated SQL/RLS setup with migration hashes and Supabase security-advisor checks
 - Vercel Sandbox execution for isolated npm install/build/preview
-- Up to two AI build-repair passes, each preserved as a new version
-- Sandbox egress switches to deny-all before generated preview code starts
-- Persistent build runs with install/build/preview logs and preview URL
+- Playwright browser QA inside the same sandbox at desktop, tablet, and mobile widths
+- Runtime QA checks for blank/collapsed pages, horizontal overflow, broken images, uncaught JS errors, console errors, and failed critical requests
+- Up to two total AI build/QA repair passes, each preserved as a new version
+- Sandbox egress switches to deny-all after browser QA passes
+- Persistent build runs with install/build/QA/preview logs, structured QA findings, and preview URL
 - Three-pane builder workspace with live iframe preview
 - GitHub source control for the builder platform
 
@@ -26,6 +28,7 @@ Independent AI-powered no-code/full-code app builder foundation.
 - Supabase
 - OpenAI Responses API
 - Vercel Sandbox `@vercel/sandbox@3.6.1`
+- Playwright `1.64.0` installed only inside disposable build sandboxes
 
 ## Setup
 
@@ -40,7 +43,22 @@ Independent AI-powered no-code/full-code app builder foundation.
 
 ## Build pipeline
 
-`Prompt → architecture → generated source → numbered version → dedicated app backend (when required) → guarded SQL/RLS → Supabase security advisor → Vercel Sandbox → npm install → production build → automatic repair if needed → egress deny-all → Vite preview server → live preview URL`
+`Prompt → architecture → generated source → numbered version → dedicated app backend (when required) → guarded SQL/RLS → Supabase security advisor → Vercel Sandbox → npm install → production build → automatic build repair if needed → Vite preview → Playwright desktop/tablet/mobile QA → automatic QA repair if needed → egress deny-all → live preview URL`
+
+## Browser QA gate
+
+A generated version is not marked `tested` or exposed as ready until the browser gate passes. The gate currently verifies:
+
+- successful page navigation/HTTP response
+- meaningful rendered UI instead of a blank page
+- non-collapsed document layout
+- no horizontal viewport overflow at 1440px, 768px, and 390px widths
+- no broken rendered images
+- no uncaught browser/page exceptions
+- no browser console errors
+- critical request failures are retained as warnings for diagnostics
+
+QA screenshots are captured inside the disposable sandbox for each viewport so the next visual-analysis milestone can consume the exact tested render.
 
 ## Security boundaries
 
@@ -52,7 +70,7 @@ Independent AI-powered no-code/full-code app builder foundation.
 - New generated public tables must enable Row Level Security.
 - Generated paths reject traversal, `.git`, `.github`, and credential files.
 - Source bundles are capped at 2 MB and code-generation files are SHA-256 hashed.
-- Sandbox network access is disabled before generated preview code starts.
+- Sandbox network access is available only through install/build/browser-QA, then disabled before the user-facing preview is declared ready.
 - Supabase RLS protects all control-plane records per project owner.
 
 ## Current schema-evolution rule
@@ -62,7 +80,7 @@ The first schema is applied only to a newly provisioned empty app backend. If a 
 ## Next milestones
 
 1. Supabase DEV-branch schema evolution and safe merge-to-production.
-2. Browser QA with Playwright and visual regression/repair.
+2. AI visual analysis of the Playwright screenshots and visual-regression repair.
 3. Persistent GitHub repositories and two-way sync for generated applications.
 4. Select & Edit component targeting.
 5. Production deployment and custom domains.
