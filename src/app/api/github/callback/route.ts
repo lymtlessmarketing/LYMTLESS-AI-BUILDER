@@ -4,7 +4,6 @@ import {
   getGithubUser,
   listGithubInstallations,
   saveGithubConnection,
-  selectInstallation,
 } from "@/lib/github/client";
 import { verifyGithubState } from "@/lib/github/security";
 import { syncProjectToGithub } from "@/lib/github/sync";
@@ -35,11 +34,11 @@ export async function GET(request: Request) {
     const token = await exchangeGithubCode(code, callbackUrl);
     const githubUser = await getGithubUser(token.access_token);
     const installations = await listGithubInstallations(token.access_token);
-    const installation = selectInstallation(installations, githubUser);
+    const installation = installations.find((candidate) => candidate.account.id === githubUser.id) ?? null;
     await saveGithubConnection({ userId: user.id, githubUser, installation, token });
 
     if (!installation) {
-      return NextResponse.redirect(new URL(`/builder/${state.projectId}?github=installation_required`, requestUrl.origin));
+      return NextResponse.redirect(new URL(`/builder/${state.projectId}?github=personal_installation_required`, requestUrl.origin));
     }
 
     try {
