@@ -126,12 +126,38 @@ function dnsInstructions(domain: string, attached: { verified?: boolean; verific
   for (const challenge of attached.verification || []) {
     if (challenge.type && challenge.value) records.push({ type: challenge.type.toUpperCase(), name: challenge.domain || domain, value: challenge.value, purpose: "Domain ownership verification" });
   }
+
   if (config.misconfigured === true) {
+    const cname = preferredCname(config) || "cname.vercel-dns-0.com";
+    const ipv4 = preferredIpv4(config) || "76.76.21.21";
     const labels = domain.split(".");
-    if (labels.length > 2) records.push({ type: "CNAME", name: domain, value: "cname.vercel-dns.com", purpose: "Route this subdomain to Vercel" });
-    else records.push({ type: "A", name: "@", value: "76.76.21.21", purpose: "Route this apex domain to Vercel" });
+    if (labels.length > 2) records.push({ type: "CNAME", name: domain, value: cname, purpose: "Route this subdomain to Vercel" });
+    else records.push({ type: "A", name: "@", value: ipv4, purpose: "Route this apex domain to Vercel" });
   }
   return { status: domainStatus(attached, config), records };
+}
+
+function preferredCname(config: Record<string, unknown>) {
+  const values = Array.isArray(config.recommendedCNAME) ? config.recommendedCNAME : [];
+  const ranked = values
+    .filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === "object")
+    .sort((a, b) => Number(a.rank || 999) - Number(b.rank || 999));
+  const preferred = ranked.find((entry) => typeof entry.value === "string")?.value;
+  return typeof preferred === "string" ? preferred.replace(/\.$/, "") : null;
+}
+
+function preferredIpv4(config: Record<string, unknown>) {
+  const values = Array.isArray(config.recommendedIPv4) ? config.recommendedIPv4 : [];
+  const ranked = values
+    .filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === "object")
+    .sort((a, b) => Number(a.rank || 999) - Number(b.rank || 999));
+  for (const entry of ranked) {
+    if (Array.isArray(entry.value)) {
+      const ip = entry.value.find((value): value is string => typeof value === "string");
+      if (ip) return ip;
+    }
+  }
+  return null;
 }
 
 function boundedJson(value: unknown) {
