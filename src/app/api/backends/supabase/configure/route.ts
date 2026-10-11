@@ -70,7 +70,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ configured: true, appliedMigrations: 0, securityFindings: 0, reused: true });
     }
 
-    pending.forEach((migration) => validateGeneratedMigration(migration.content));
+    const safetyMode = backend.schema_version_id ? "evolution" : "initial";
+    pending.forEach((migration) => validateGeneratedMigration(migration.content, { mode: safetyMode }));
     await supabase.from("app_backends").update({ status: "configuring", error_message: null }).eq("id", backend.id);
 
     if (!backend.schema_version_id) {
