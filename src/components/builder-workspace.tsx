@@ -104,7 +104,8 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
     const initial = sessionStorage.getItem(`initial-prompt:${projectId}`);
     if (!initial) return;
     sessionStorage.removeItem(`initial-prompt:${projectId}`);
-    void runPipeline(initial);
+    const timer = window.setTimeout(() => { void runPipeline(initial); }, 0);
+    return () => window.clearTimeout(timer);
   }, [projectId, runPipeline]);
 
   return (
