@@ -19,15 +19,19 @@ export async function GET(request: Request) {
       .single();
     if (projectError || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
 
-    const [{ data: hosting }, { data: domains }, { data: latestDeployment }] = await Promise.all([
+    const [{ data: hosting }, { data: domains }, { data: latestDeployment }, { data: currentVersion }] = await Promise.all([
       supabase.from("hosting_projects").select("provider,provider_project_id,provider_project_name").eq("project_id", projectId).maybeSingle(),
       supabase.from("project_domains").select("id,domain,status,verified,verification,dns_config,error_message").eq("project_id", projectId).order("created_at", { ascending: true }),
       supabase.from("deployments").select("id,version_id,provider_deployment_id,url,status,created_at").eq("project_id", projectId).eq("environment", "production").order("created_at", { ascending: false }).limit(1).maybeSingle(),
+      project.current_version_id
+        ? supabase.from("versions").select("id,status,version_number").eq("id", project.current_version_id).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
     ]);
 
     return NextResponse.json({
       productionUrl: project.production_url,
       currentVersionId: project.current_version_id,
+      currentVersion: currentVersion || null,
       hosting: hosting || null,
       latestDeployment: latestDeployment || null,
       domains: domains || [],
