@@ -6,7 +6,6 @@ import {
   uploadDeploymentFiles,
   vercelPlatformConfigured,
   waitForDeployment,
-  type VercelProject,
 } from "@/lib/vercel/platform";
 import { createClient } from "@/lib/supabase/server";
 
@@ -62,12 +61,11 @@ export async function POST(request: Request) {
         .select("status,api_url,publishable_key")
         .eq("project_id", projectId)
         .maybeSingle();
-      const env = backend?.status === "ready" && backend.api_url && backend.publishable_key
-        ? {
-            VITE_SUPABASE_URL: String(backend.api_url),
-            VITE_SUPABASE_PUBLISHABLE_KEY: String(backend.publishable_key),
-          }
-        : {};
+      const env: Record<string, string> = {};
+      if (backend?.status === "ready" && backend.api_url && backend.publishable_key) {
+        env.VITE_SUPABASE_URL = String(backend.api_url);
+        env.VITE_SUPABASE_PUBLISHABLE_KEY = String(backend.publishable_key);
+      }
 
       const providerProject = await createHostingProject(projectName(project.name, projectId), env);
       const { data: createdHosting, error: hostingError } = await supabase
