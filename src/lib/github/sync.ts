@@ -10,6 +10,9 @@ import {
 } from "@/lib/github/client";
 import type { SourceFile } from "@/lib/sandbox/build";
 
+const SOURCE_FILE_PATTERN = /\.(?:ts|tsx|js|jsx|mjs|cjs|css|scss|sass|less|html|json|md|sql|toml|ya?ml|graphql|gql|svg)$/i;
+const SOURCE_BASENAMES = new Set([".gitignore", ".npmignore", "Dockerfile"]);
+
 export async function syncProjectToGithub(projectId: string, userId: string) {
   const admin = createAdminClient();
   const { data: project, error: projectError } = await admin
@@ -24,7 +27,7 @@ export async function syncProjectToGithub(projectId: string, userId: string) {
 
   try {
     const { connection, accessToken } = await getValidGithubConnection(userId);
-    if (!connection.installation_id) throw new Error("Install the LYMTLESS GitHub App before syncing a repository");
+    if (!connection.installation_id) throw new Error("Install the LYMTLESS GitHub App on your personal GitHub account before syncing a repository");
 
     let repoId = project.github_repo_id as number | null;
     let fullName = project.github_repo_full_name as string | null;
@@ -93,11 +96,15 @@ export async function importGithubCommit(options: {
 }) {
   const admin = createAdminClient();
   const { accessToken } = await getValidGithubConnection(options.userId);
-  const files = await readRepositorySnapshot({
+  const snapshot = await readRepositorySnapshot({
     token: accessToken,
     fullName: options.repoFullName,
     commitSha: options.commitSha,
   });
+  const files = snapshot.filter((file) => isAllowedImportedSource(file.path));
+  if (!files.some((file) => file.path === "package.json")) {
+    throw new Error("GitHub import was rejected because package.json was not present in the allowed source snapshot");
+  }
 
   const payload = files.map((file) => ({
     path: file.path,
@@ -115,4 +122,9 @@ export async function importGithubCommit(options: {
   if (error) throw new Error(`Could not import GitHub commit: ${error.message}`);
   const row = Array.isArray(data) ? data[0] : data;
   return { versionId: row?.id as string | undefined, versionNumber: row?.version_number as number | undefined, files: files.length };
+}
+
+function isAllowedImportedSource(path: string) {
+  const basename = path.split("/").at(-1) || "";
+  return SOURCE_BASENAMES.has(basename) || SOURCE_FILE_PATTERN.test(path);
 }
