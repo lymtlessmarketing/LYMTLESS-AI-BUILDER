@@ -39,7 +39,7 @@ export async function createHostingProject(name: string, env: Record<string, str
       key,
       value,
       type: "plain",
-      target: ["production", "preview"],
+      target: "production",
     }));
   }
   return request<VercelProject>("/v11/projects", { method: "POST", body: JSON.stringify(body) });
