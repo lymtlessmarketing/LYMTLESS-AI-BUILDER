@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { DeploymentControls } from "@/components/deployment-controls";
 
 type GithubStatus = {
   connected: boolean;
@@ -58,24 +59,22 @@ export function GithubControls({ projectId, versionId }: { projectId: string; ve
     return () => window.clearTimeout(timer);
   }, [status?.connected, sync, versionId]);
 
-  if (!status?.connected) {
-    return (
-      <a className="secondary-btn" href={`/api/github/connect?projectId=${encodeURIComponent(projectId)}`} title={error || undefined}>
-        Connect GitHub
-      </a>
-    );
-  }
-
   return (
-    <div style={{ display: "flex", gap: 8, alignItems: "center" }} title={error || status.syncError || undefined}>
-      {status.repoFullName ? (
-        <a className="secondary-btn" href={`https://github.com/${status.repoFullName}`} target="_blank" rel="noreferrer">
-          Open Repo
-        </a>
-      ) : null}
-      <button className="secondary-btn" type="button" disabled={syncing} onClick={() => void sync()}>
-        {syncing ? "Syncing…" : status.repoFullName ? "Sync GitHub" : "Create GitHub Repo"}
-      </button>
+    <div className="github-deployment-controls" style={{ display: "flex", gap: 8, alignItems: "center" }} title={error || status?.syncError || undefined}>
+      <style>{`.topbar .github-deployment-controls + button.primary-btn { display: none; }`}</style>
+      {!status?.connected ? (
+        <a className="secondary-btn" href={`/api/github/connect?projectId=${encodeURIComponent(projectId)}`}>Connect GitHub</a>
+      ) : (
+        <>
+          {status.repoFullName ? (
+            <a className="secondary-btn" href={`https://github.com/${status.repoFullName}`} target="_blank" rel="noreferrer">Open Repo</a>
+          ) : null}
+          <button className="secondary-btn" type="button" disabled={syncing} onClick={() => void sync()}>
+            {syncing ? "Syncing…" : status.repoFullName ? "Sync GitHub" : "Create GitHub Repo"}
+          </button>
+        </>
+      )}
+      <DeploymentControls projectId={projectId} ready={Boolean(versionId)} />
     </div>
   );
 }
