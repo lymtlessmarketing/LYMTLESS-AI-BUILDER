@@ -14,6 +14,7 @@ type DomainRecord = {
 
 type DeployStatus = {
   productionUrl: string | null;
+  currentVersion: { id: string; status: string; version_number: number } | null;
   latestDeployment: { status: string; url?: string | null } | null;
   domains: DomainRecord[];
 };
@@ -45,6 +46,9 @@ export function DeploymentControls({ projectId, ready }: { projectId: string; re
     return () => window.clearTimeout(timer);
   }, [refresh]);
 
+  const persistedReady = status?.currentVersion && ["tested", "deployed"].includes(status.currentVersion.status);
+  const canPublish = ready || Boolean(persistedReady);
+
   async function publish() {
     setPublishing(true);
     setError("");
@@ -56,11 +60,7 @@ export function DeploymentControls({ projectId, ready }: { projectId: string; re
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Production deployment failed");
-      setStatus((current) => ({
-        productionUrl: data.productionUrl,
-        latestDeployment: { status: "ready", url: data.productionUrl },
-        domains: current?.domains || [],
-      }));
+      await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Production deployment failed");
     } finally {
@@ -112,7 +112,7 @@ export function DeploymentControls({ projectId, ready }: { projectId: string; re
       {status?.productionUrl ? (
         <a className="secondary-btn" href={status.productionUrl} target="_blank" rel="noreferrer">Live Site</a>
       ) : null}
-      <button className="primary-btn" type="button" disabled={!ready || publishing} onClick={() => void publish()}>
+      <button className="primary-btn" type="button" disabled={!canPublish || publishing} onClick={() => void publish()}>
         {publishing ? "Publishing…" : status?.productionUrl ? "Republish" : "Publish"}
       </button>
       {status?.productionUrl ? (
