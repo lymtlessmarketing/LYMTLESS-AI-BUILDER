@@ -9,6 +9,16 @@ export type PlatformProject = {
   status?: string;
 };
 
+export type PlatformBranch = {
+  id?: string;
+  name?: string;
+  project_ref?: string;
+  parent_project_ref?: string;
+  persistent?: boolean;
+  status?: string;
+  with_data?: boolean;
+};
+
 type OrganizationProjectsResponse = {
   projects?: PlatformProject[];
   pagination?: { count?: number; limit?: number; offset?: number };
@@ -20,6 +30,11 @@ type ApiKeyRecord = {
   name?: string;
   api_key?: string;
   disabled?: boolean;
+};
+
+type MergeResponse = {
+  workflow_run_id?: string;
+  message?: string;
 };
 
 export function managementConfigured() {
@@ -49,6 +64,36 @@ export async function createPlatformProject(options: { name: string; dbPassword:
       db_pass: options.dbPassword,
       region_selection: { type: "smartGroup", code: smartRegion },
     }),
+  });
+}
+
+export async function createDevelopmentBranch(parentRef: string, branchName: string) {
+  return managementRequest<PlatformBranch>(`/v1/projects/${encodeURIComponent(parentRef)}/branches`, {
+    method: "POST",
+    body: JSON.stringify({
+      branch_name: branchName,
+      persistent: false,
+      with_data: false,
+    }),
+  });
+}
+
+export async function getDevelopmentBranch(parentRef: string, branchName: string) {
+  return managementRequest<PlatformBranch>(
+    `/v1/projects/${encodeURIComponent(parentRef)}/branches/${encodeURIComponent(branchName)}`,
+  );
+}
+
+export async function mergeDevelopmentBranch(branchRefOrId: string) {
+  return managementRequest<MergeResponse>(`/v1/branches/${encodeURIComponent(branchRefOrId)}/merge`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function deleteDevelopmentBranch(branchRefOrId: string) {
+  return managementRequest<{ message?: string }>(`/v1/branches/${encodeURIComponent(branchRefOrId)}?force=true`, {
+    method: "DELETE",
   });
 }
 
@@ -86,6 +131,13 @@ export async function runDatabaseQuery(ref: string, query: string) {
   return managementRequest<unknown>(`/v1/projects/${encodeURIComponent(ref)}/database/query`, {
     method: "POST",
     body: JSON.stringify({ query, read_only: false }),
+  });
+}
+
+export async function runReadOnlyDatabaseQuery<T = unknown>(ref: string, query: string) {
+  return managementRequest<T>(`/v1/projects/${encodeURIComponent(ref)}/database/query`, {
+    method: "POST",
+    body: JSON.stringify({ query, read_only: true }),
   });
 }
 
