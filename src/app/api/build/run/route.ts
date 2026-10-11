@@ -75,7 +75,7 @@ export async function POST(request: Request) {
     buildRunId = buildRun.id;
 
     sandbox = await createBuildSandbox();
-    await updateBuildRun(supabase, buildRunId, { sandbox_id: sandbox.sandboxId, status: "installing" });
+    await updateBuildRun(supabase, buildRunId, { sandbox_name: sandbox.name, status: "installing" });
     await writeSourceFiles(sandbox, files);
 
     let repairAttempts = 0;
@@ -183,7 +183,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       buildRunId,
-      sandboxId: sandbox.sandboxId,
+      sandboxName: sandbox.name,
       versionId: currentVersionId,
       previewUrl: preview.previewUrl,
       repairAttempts,
