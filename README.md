@@ -25,12 +25,13 @@ Independent AI-powered no-code/full-code app builder foundation.
 ## Setup
 
 1. Create a Supabase project.
-2. Run both migrations in `supabase/migrations/` in order.
+2. Run all migrations in `supabase/migrations/` in numeric order.
 3. Copy `.env.example` to `.env.local` and set:
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
    - `OPENAI_API_KEY`
    - `OPENAI_MODEL` (defaults to `gpt-6.1-sol`)
+   - `OPENAI_CODE_MODEL` (optional separate code-generation model)
 4. Install dependencies with `npm install`.
 5. Run `npm run dev`.
 
@@ -38,7 +39,7 @@ Independent AI-powered no-code/full-code app builder foundation.
 
 - Natural-language architecture planning with schema-enforced Structured Outputs
 - Complete generated application code bundles
-- Path/secret-file validation before persistence
+- Path/secret/repository-control validation, 2 MB source limits, and SHA-256 hashes before persistence
 - Numbered project versions created transactionally in Supabase
 - Generated files persisted per version
 - Builder UI displays generation progress and generated source tree

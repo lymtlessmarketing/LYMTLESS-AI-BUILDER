@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
@@ -9,6 +10,8 @@ import { createClient } from "@/lib/supabase/server";
 
 const requestSchema = z.object({ projectId: z.string().uuid() });
 const forbiddenSecretFile = /(^|\/)(\.env|\.env\.local|\.env\.production|credentials\.json|service-account.*\.json)$/i;
+const forbiddenRepositoryPath = /^(\.git|\.github)(\/|$)/i;
+const maxBundleBytes = 2_000_000;
 
 function validateGeneratedPath(input: string) {
   const normalized = path.posix.normalize(input.replaceAll("\\", "/"));
@@ -16,15 +19,18 @@ function validateGeneratedPath(input: string) {
     throw new Error(`Unsafe generated path: ${input}`);
   }
   if (forbiddenSecretFile.test(normalized)) throw new Error(`Generated secret file is not allowed: ${normalized}`);
+  if (forbiddenRepositoryPath.test(normalized)) throw new Error(`Generated repository-control file is not allowed: ${normalized}`);
   return normalized;
 }
 
 export async function POST(request: Request) {
   const supabase = await createClient();
   let runId: string | null = null;
+  let projectId: string | null = null;
 
   try {
     const body = requestSchema.parse(await request.json());
+    projectId = body.projectId;
     const { data: authData } = await supabase.auth.getUser();
     const user = authData.user;
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -67,11 +73,18 @@ export async function POST(request: Request) {
     if (!generated) throw new Error("Model returned no parsed generated application");
 
     const seen = new Set<string>();
+    let bundleBytes = 0;
     const files = generated.files.map((file) => {
       const safePath = validateGeneratedPath(file.path);
       if (seen.has(safePath)) throw new Error(`Duplicate generated path: ${safePath}`);
       seen.add(safePath);
-      return { path: safePath, content: file.content };
+      bundleBytes += Buffer.byteLength(file.content, "utf8");
+      if (bundleBytes > maxBundleBytes) throw new Error("Generated application exceeds the 2 MB source bundle limit");
+      return {
+        path: safePath,
+        content: file.content,
+        contentHash: createHash("sha256").update(file.content, "utf8").digest("hex"),
+      };
     });
 
     const { data: version, error: versionError } = await supabase.rpc("create_project_version", {
@@ -89,6 +102,7 @@ export async function POST(request: Request) {
         version_id: versionRow.id,
         path: file.path,
         content: file.content,
+        content_hash: file.contentHash,
       })),
     );
     if (filesError) throw new Error(filesError.message);
@@ -116,6 +130,7 @@ export async function POST(request: Request) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to generate application";
     if (runId) await supabase.from("ai_runs").update({ status: "failed", error_message: message }).eq("id", runId);
+    if (projectId) await supabase.from("projects").update({ status: "failed" }).eq("id", projectId);
     if (error instanceof z.ZodError) return NextResponse.json({ error: "Invalid generation request", details: error.issues }, { status: 400 });
     console.error(error);
     return NextResponse.json({ error: message }, { status: 500 });

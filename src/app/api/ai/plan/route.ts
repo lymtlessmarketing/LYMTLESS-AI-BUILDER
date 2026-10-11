@@ -12,9 +12,14 @@ const requestSchema = z.object({
 });
 
 export async function POST(request: Request) {
+  const supabase = await createClient();
+  let runId: string | null = null;
+  let projectId: string | null = null;
+
   try {
     const body = requestSchema.parse(await request.json());
-    const supabase = await createClient();
+    projectId = body.projectId;
+
     const { data: authData } = await supabase.auth.getUser();
     const user = authData.user;
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -52,6 +57,7 @@ export async function POST(request: Request) {
       })
       .select("id")
       .single();
+    runId = run?.id ?? null;
 
     const client = new OpenAI({ apiKey });
     const response = await client.responses.parse({
@@ -66,15 +72,7 @@ export async function POST(request: Request) {
     });
 
     const blueprint = response.output_parsed;
-    if (!blueprint) {
-      if (run?.id) {
-        await supabase
-          .from("ai_runs")
-          .update({ status: "failed", error_message: "Model returned no parsed blueprint" })
-          .eq("id", run.id);
-      }
-      return NextResponse.json({ error: "AI did not return a valid application blueprint" }, { status: 502 });
-    }
+    if (!blueprint) throw new Error("AI did not return a valid application blueprint");
 
     await Promise.all([
       supabase.from("messages").insert({
@@ -90,21 +88,24 @@ export async function POST(request: Request) {
         blueprint,
         status: "planned",
       }).eq("id", body.projectId),
-      ...(run?.id
+      ...(runId
         ? [supabase.from("ai_runs").update({
             status: "succeeded",
             input_tokens: response.usage?.input_tokens ?? null,
             output_tokens: response.usage?.output_tokens ?? null,
-          }).eq("id", run.id)]
+          }).eq("id", runId)]
         : []),
     ]);
 
     return NextResponse.json({ blueprint });
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to create application plan";
+    if (runId) await supabase.from("ai_runs").update({ status: "failed", error_message: message }).eq("id", runId);
+    if (projectId) await supabase.from("projects").update({ status: "failed" }).eq("id", projectId);
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Invalid request", details: error.issues }, { status: 400 });
     }
     console.error(error);
-    return NextResponse.json({ error: "Unable to create application plan" }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
