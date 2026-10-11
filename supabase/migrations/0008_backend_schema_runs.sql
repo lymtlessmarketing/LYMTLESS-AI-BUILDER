@@ -16,6 +16,7 @@ create table if not exists public.backend_schema_runs (
 create index if not exists backend_schema_runs_project_created_idx on public.backend_schema_runs(project_id, created_at desc);
 create index if not exists backend_schema_runs_app_backend_id_idx on public.backend_schema_runs(app_backend_id);
 create index if not exists backend_schema_runs_user_id_idx on public.backend_schema_runs(user_id);
+create index if not exists backend_schema_runs_branch_ref_idx on public.backend_schema_runs(branch_ref) where branch_ref is not null;
 create index if not exists backend_schema_runs_source_version_id_idx on public.backend_schema_runs(source_version_id);
 
 alter table public.backend_schema_runs enable row level security;
