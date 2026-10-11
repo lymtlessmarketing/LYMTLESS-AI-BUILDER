@@ -34,12 +34,21 @@ Independent AI-powered no-code/full-code app builder foundation.
 4. Install dependencies with `npm install`.
 5. Run `npm run dev`.
 
+## Current generation pipeline
+
+- Natural-language architecture planning with schema-enforced Structured Outputs
+- Complete generated application code bundles
+- Path/secret-file validation before persistence
+- Numbered project versions created transactionally in Supabase
+- Generated files persisted per version
+- Builder UI displays generation progress and generated source tree
+
 ## Next milestone
 
-1. Code-generation agent that writes files in batches.
-2. Sandbox executor for install/build/run.
-3. Playwright browser QA + repair loop.
+1. Sandbox executor for install/build/run.
+2. Automated build-error repair loop.
+3. Playwright browser QA.
 4. Real live preview URL.
-5. GitHub App repo creation + two-way sync.
+5. GitHub App repo creation + two-way sync for generated apps.
 6. Select-and-edit component targeting.
 7. One-click deployment.

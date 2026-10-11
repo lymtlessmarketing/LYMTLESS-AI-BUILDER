@@ -30,4 +30,13 @@ export const appBlueprintSchema = z.object({
   }),
 });
 
+export const generatedAppSchema = z.object({
+  summary: z.string().min(1),
+  files: z.array(z.object({
+    path: z.string().min(1).max(240),
+    content: z.string().max(120_000),
+  })).min(5).max(80),
+});
+
 export type AppBlueprint = z.infer<typeof appBlueprintSchema>;
+export type GeneratedApp = z.infer<typeof generatedAppSchema>;

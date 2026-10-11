@@ -87,6 +87,7 @@ export async function POST(request: Request) {
       supabase.from("projects").update({
         name: blueprint.name,
         description: blueprint.summary,
+        blueprint,
         status: "planned",
       }).eq("id", body.projectId),
       ...(run?.id
