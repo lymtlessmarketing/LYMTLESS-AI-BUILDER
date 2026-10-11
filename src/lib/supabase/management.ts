@@ -9,6 +9,24 @@ export type PlatformProject = {
   status?: string;
 };
 
+export type DatabaseBranch = {
+  id?: string;
+  name: string;
+  project_ref: string;
+  parent_project_ref?: string;
+  persistent?: boolean;
+  with_data?: boolean;
+  status?: string;
+  preview_project_status?: string;
+};
+
+type ActionRun = {
+  id?: string;
+  failure?: unknown;
+  run_steps?: Array<{ name?: string; status?: string }>;
+  steps?: Array<{ name?: string; status?: string }>;
+};
+
 type OrganizationProjectsResponse = {
   projects?: PlatformProject[];
   pagination?: { count?: number; limit?: number; offset?: number };
@@ -54,14 +72,92 @@ export async function createPlatformProject(options: { name: string; dbPassword:
 
 export async function waitForProjectHealthy(ref: string, timeoutMs = 180_000) {
   const started = Date.now();
-
   while (Date.now() - started < timeoutMs) {
     const health = await managementRequest<unknown>(`/v1/projects/${encodeURIComponent(ref)}/health`);
     if (healthIsReady(health)) return health;
     await sleep(2500);
   }
-
   throw new Error(`Supabase project ${ref} did not become healthy before timeout`);
+}
+
+export async function createDatabaseBranch(parentRef: string, branchName: string) {
+  return managementRequest<DatabaseBranch>(`/v1/projects/${encodeURIComponent(parentRef)}/branches`, {
+    method: "POST",
+    body: JSON.stringify({
+      branch_name: branchName,
+      persistent: false,
+      with_data: false,
+      is_default: false,
+    }),
+  });
+}
+
+export async function getDatabaseBranch(parentRef: string, branchName: string) {
+  return managementRequest<DatabaseBranch>(
+    `/v1/projects/${encodeURIComponent(parentRef)}/branches/${encodeURIComponent(branchName)}`,
+  );
+}
+
+export async function waitForDatabaseBranch(parentRef: string, branchName: string, timeoutMs = 180_000) {
+  const started = Date.now();
+  let last: DatabaseBranch | null = null;
+  while (Date.now() - started < timeoutMs) {
+    last = await getDatabaseBranch(parentRef, branchName);
+    if (last.project_ref) {
+      try {
+        await waitForProjectHealthy(last.project_ref, 15_000);
+        return last;
+      } catch {
+        // Branch exists but its services may still be provisioning.
+      }
+    }
+    const status = `${last.status || ""} ${last.preview_project_status || ""}`.toUpperCase();
+    if (/(FAILED|ERROR|DELETED)/.test(status)) {
+      throw new Error(`Supabase branch ${branchName} failed to provision (${status.trim()})`);
+    }
+    await sleep(2500);
+  }
+  throw new Error(`Supabase branch ${branchName} did not become healthy before timeout${last?.status ? ` (${last.status})` : ""}`);
+}
+
+export async function mergeDatabaseBranch(branchRef: string) {
+  return managementRequest<{ workflow_run_id?: string; message?: string }>(
+    `/v1/branches/${encodeURIComponent(branchRef)}/merge`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export async function deleteDatabaseBranch(branchRef: string) {
+  return managementRequest<{ message?: string }>(
+    `/v1/branches/${encodeURIComponent(branchRef)}?force=true`,
+    { method: "DELETE" },
+  );
+}
+
+export async function getActionRun(parentRef: string, runId: string) {
+  return managementRequest<ActionRun>(
+    `/v1/projects/${encodeURIComponent(parentRef)}/actions/${encodeURIComponent(runId)}`,
+  );
+}
+
+export async function waitForActionRun(parentRef: string, runId: string, timeoutMs = 180_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const run = await getActionRun(parentRef, runId);
+    const steps = run.run_steps || run.steps || [];
+    if (run.failure) throw new Error(`Supabase action ${runId} failed: ${stringifyFailure(run.failure)}`);
+    if (steps.length > 0) {
+      const statuses = steps.map((step) => (step.status || "").toLowerCase());
+      if (statuses.some((status) => ["failed", "failure", "cancelled", "canceled", "error"].includes(status))) {
+        throw new Error(`Supabase action ${runId} failed (${statuses.join(", ")})`);
+      }
+      if (statuses.every((status) => ["exited", "completed", "success", "succeeded", "skipped"].includes(status))) {
+        return run;
+      }
+    }
+    await sleep(2000);
+  }
+  throw new Error(`Supabase action ${runId} did not complete before timeout`);
 }
 
 export async function ensurePublishableKey(ref: string) {
@@ -179,6 +275,11 @@ function extractError(payload: unknown) {
     if (typeof record[key] === "string") return record[key] as string;
   }
   return "";
+}
+
+function stringifyFailure(value: unknown) {
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value); } catch { return "unknown failure"; }
 }
 
 function sleep(ms: number) {
