@@ -6,6 +6,8 @@ import { ARCHITECT_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { appBlueprintSchema } from "@/lib/ai/schemas";
 import { createClient } from "@/lib/supabase/server";
 
+export const runtime = "nodejs";
+
 const requestSchema = z.object({
   projectId: z.string().uuid(),
   prompt: z.string().trim().min(10).max(20_000),
@@ -39,14 +41,15 @@ export async function POST(request: Request) {
 
     const model = process.env.OPENAI_MODEL || "gpt-6.1-sol";
 
-    await supabase.from("messages").insert({
+    const { error: userMessageError } = await supabase.from("messages").insert({
       project_id: body.projectId,
       user_id: user.id,
       role: "user",
       content: body.prompt,
     });
+    if (userMessageError) console.warn("User message audit write failed:", userMessageError.message);
 
-    const { data: run } = await supabase
+    const { data: run, error: runError } = await supabase
       .from("ai_runs")
       .insert({
         project_id: body.projectId,
@@ -57,6 +60,7 @@ export async function POST(request: Request) {
       })
       .select("id")
       .single();
+    if (runError) console.warn("AI run audit creation failed:", runError.message);
     runId = run?.id ?? null;
 
     const client = new OpenAI({ apiKey });
@@ -74,7 +78,15 @@ export async function POST(request: Request) {
     const blueprint = response.output_parsed;
     if (!blueprint) throw new Error("AI did not return a valid application blueprint");
 
-    await Promise.all([
+    const { error: projectUpdateError } = await supabase.from("projects").update({
+      name: blueprint.name,
+      description: blueprint.summary,
+      blueprint,
+      status: "planned",
+    }).eq("id", body.projectId);
+    if (projectUpdateError) throw new Error(projectUpdateError.message);
+
+    const auditResults = await Promise.all([
       supabase.from("messages").insert({
         project_id: body.projectId,
         user_id: user.id,
@@ -82,20 +94,17 @@ export async function POST(request: Request) {
         content: `Created architecture blueprint for ${blueprint.name}.`,
         metadata: { blueprint },
       }),
-      supabase.from("projects").update({
-        name: blueprint.name,
-        description: blueprint.summary,
-        blueprint,
-        status: "planned",
-      }).eq("id", body.projectId),
-      ...(runId
-        ? [supabase.from("ai_runs").update({
+      runId
+        ? supabase.from("ai_runs").update({
             status: "succeeded",
             input_tokens: response.usage?.input_tokens ?? null,
             output_tokens: response.usage?.output_tokens ?? null,
-          }).eq("id", runId)]
-        : []),
+          }).eq("id", runId)
+        : Promise.resolve({ error: null }),
     ]);
+    auditResults.forEach((result) => {
+      if (result.error) console.warn("Planning audit write failed:", result.error.message);
+    });
 
     return NextResponse.json({ blueprint });
   } catch (error) {

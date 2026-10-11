@@ -8,6 +8,8 @@ import { generatedAppSchema } from "@/lib/ai/schemas";
 import { CODEGEN_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { createClient } from "@/lib/supabase/server";
 
+export const runtime = "nodejs";
+
 const requestSchema = z.object({ projectId: z.string().uuid() });
 const forbiddenSecretFile = /(^|\/)(\.env|\.env\.local|\.env\.production|credentials\.json|service-account.*\.json)$/i;
 const forbiddenRepositoryPath = /^(\.git|\.github)(\/|$)/i;
@@ -50,13 +52,15 @@ export async function POST(request: Request) {
     if (!apiKey) return NextResponse.json({ error: "OPENAI_API_KEY is not configured" }, { status: 503 });
     const model = process.env.OPENAI_CODE_MODEL || process.env.OPENAI_MODEL || "gpt-6.1-sol";
 
-    await supabase.from("projects").update({ status: "generating" }).eq("id", body.projectId);
+    const { error: statusError } = await supabase.from("projects").update({ status: "generating" }).eq("id", body.projectId);
+    if (statusError) throw new Error(statusError.message);
 
-    const { data: run } = await supabase
+    const { data: run, error: runError } = await supabase
       .from("ai_runs")
       .insert({ project_id: body.projectId, user_id: user.id, run_type: "generate", model, status: "running" })
       .select("id")
       .single();
+    if (runError) throw new Error(runError.message);
     runId = run?.id ?? null;
 
     const client = new OpenAI({ apiKey });
@@ -83,37 +87,28 @@ export async function POST(request: Request) {
       return {
         path: safePath,
         content: file.content,
-        contentHash: createHash("sha256").update(file.content, "utf8").digest("hex"),
+        content_hash: createHash("sha256").update(file.content, "utf8").digest("hex"),
       };
     });
 
-    const { data: version, error: versionError } = await supabase.rpc("create_project_version", {
+    const { data: version, error: commitError } = await supabase.rpc("commit_project_generation", {
       p_project_id: body.projectId,
       p_summary: generated.summary,
+      p_files: files,
     });
-    if (versionError || !version) throw new Error(versionError?.message || "Could not create project version");
+    if (commitError || !version) throw new Error(commitError?.message || "Could not commit generated application");
 
     const versionRow = Array.isArray(version) ? version[0] : version;
-    if (!versionRow?.id) throw new Error("Version creation returned no id");
+    if (!versionRow?.id) throw new Error("Generation commit returned no version id");
 
-    const { error: filesError } = await supabase.from("generated_files").insert(
-      files.map((file) => ({
-        project_id: body.projectId,
-        version_id: versionRow.id,
-        path: file.path,
-        content: file.content,
-        content_hash: file.contentHash,
-      })),
-    );
-    if (filesError) throw new Error(filesError.message);
-
-    await Promise.all([
-      supabase.from("projects").update({ status: "ready", current_version_id: versionRow.id }).eq("id", body.projectId),
-      ...(runId ? [supabase.from("ai_runs").update({
-        status: "succeeded",
-        input_tokens: response.usage?.input_tokens ?? null,
-        output_tokens: response.usage?.output_tokens ?? null,
-      }).eq("id", runId)] : []),
+    const auditResults = await Promise.all([
+      runId
+        ? supabase.from("ai_runs").update({
+            status: "succeeded",
+            input_tokens: response.usage?.input_tokens ?? null,
+            output_tokens: response.usage?.output_tokens ?? null,
+          }).eq("id", runId)
+        : Promise.resolve({ error: null }),
       supabase.from("messages").insert({
         project_id: body.projectId,
         user_id: user.id,
@@ -122,6 +117,9 @@ export async function POST(request: Request) {
         metadata: { versionId: versionRow.id, versionNumber: versionRow.version_number, fileCount: files.length },
       }),
     ]);
+    auditResults.forEach((result) => {
+      if (result.error) console.warn("Generation audit write failed:", result.error.message);
+    });
 
     return NextResponse.json({
       version: { id: versionRow.id, number: versionRow.version_number, summary: generated.summary },
