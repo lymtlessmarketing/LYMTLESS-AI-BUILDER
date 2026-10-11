@@ -45,11 +45,9 @@ const requestSchema = z.object({
 export async function POST(request: Request) {
   const supabase = await createClient();
   let runId: string | null = null;
-  let projectId: string | null = null;
 
   try {
     const body = requestSchema.parse(await request.json());
-    projectId = body.projectId;
 
     const { data: authData } = await supabase.auth.getUser();
     const user = authData.user;
