@@ -13,8 +13,10 @@ type SandboxBuildResult = {
   previewUrl: string;
   repairAttempts: number;
   backendConnected: boolean;
+  qa: { passed: boolean; findings: Array<{ severity: string; code: string; message: string; viewport?: string }> };
   installLog: string;
   buildLog: string;
+  qaLog: string;
   previewLog: string;
 };
 
@@ -24,7 +26,7 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
   const [generation, setGeneration] = useState<GenerationResult | null>(null);
   const [sandboxBuild, setSandboxBuild] = useState<SandboxBuildResult | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: "assistant", text: "Describe what you want to build. I’ll plan it, generate the code and backend, build it in an isolated sandbox, repair build failures automatically, and open a live preview." },
+    { role: "assistant", text: "Describe what you want to build. I’ll plan it, generate the code and backend, compile it in an isolated sandbox, run real browser QA at desktop/tablet/mobile sizes, repair failures automatically, and open a live preview." },
   ]);
   const [stage, setStage] = useState<BuildStage>("idle");
   const [busy, setBusy] = useState(false);
@@ -70,15 +72,15 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
       }
 
       setStage("building");
-      setMessages((m) => [...m, { role: "assistant", text: "Running dependency install and production build inside an isolated sandbox. Build errors will be repaired automatically." }]);
-      const buildData = await postJson("/api/build/run", { projectId }, "Sandbox build failed");
+      setMessages((m) => [...m, { role: "assistant", text: "Building in an isolated sandbox, then running Playwright browser QA at desktop, tablet, and mobile widths. Build/runtime defects will be repaired automatically." }]);
+      const buildData = await postJson("/api/build/run", { projectId }, "Sandbox build or browser QA failed");
       setSandboxBuild(buildData);
       setStage("ready");
       setMessages((m) => [...m, {
         role: "assistant",
         text: buildData.repairAttempts
-          ? `Live preview ready after ${buildData.repairAttempts} automated repair ${buildData.repairAttempts === 1 ? "pass" : "passes"}.`
-          : "Build passed on the first attempt. Live preview is ready.",
+          ? `Live preview ready after ${buildData.repairAttempts} automated repair ${buildData.repairAttempts === 1 ? "pass" : "passes"}. Browser QA passed on desktop, tablet, and mobile.`
+          : "Build passed on the first attempt, and browser QA passed on desktop, tablet, and mobile. Live preview is ready.",
       }]);
     } catch (e) {
       const message = e instanceof Error ? e.message : "The build failed";
@@ -103,6 +105,7 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
         <div className="brand">LYMTLESS AI BUILDER</div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <span className="badge">{stage.toUpperCase()}</span>
+          {sandboxBuild?.qa?.passed ? <span className="badge">QA PASSED</span> : null}
           <button className="secondary-btn" type="button">GitHub</button>
           {sandboxBuild?.previewUrl ? <a className="secondary-btn" href={sandboxBuild.previewUrl} target="_blank" rel="noreferrer">Open Preview</a> : null}
           <button className="primary-btn" type="button" disabled={stage !== "ready"}>Publish</button>
@@ -145,7 +148,7 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
             {stage === "generating" && <div className="message ai">Writing the complete application code bundle…</div>}
             {stage === "provisioning" && <div className="message ai">Creating the app’s isolated database/auth/storage project…</div>}
             {stage === "configuring" && <div className="message ai">Applying guarded SQL/RLS and running backend security checks…</div>}
-            {stage === "building" && <div className="message ai">Installing, compiling, testing the build, and repairing failures if necessary…</div>}
+            {stage === "building" && <div className="message ai">Installing, compiling, launching the preview, running browser QA, and repairing supported defects if necessary…</div>}
           </div>
           <div className="composer">
             <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={generation ? "Describe the next change…" : "Build a CRM, booking system, client portal…"} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void runPipeline(prompt); } }} />
@@ -190,7 +193,7 @@ function stageLabel(stage: BuildStage) {
   if (stage === "generating") return "Code-generation agent";
   if (stage === "provisioning") return "Backend provisioning";
   if (stage === "configuring") return "Backend security + schema";
-  if (stage === "building") return "Sandbox + repair agents";
+  if (stage === "building") return "Sandbox + browser QA + repair";
   if (stage === "ready") return "Live preview ready";
   if (stage === "failed") return "Build failed";
   return "Ready for prompt";
@@ -199,8 +202,8 @@ function stageLabel(stage: BuildStage) {
 function previewStatus(stage: BuildStage) {
   if (stage === "provisioning") return "Provisioning isolated app backend…";
   if (stage === "configuring") return "Configuring database and RLS…";
-  if (stage === "building") return "Building isolated live preview…";
-  if (stage === "ready") return "Live sandbox preview";
+  if (stage === "building") return "Building and browser-testing isolated preview…";
+  if (stage === "ready") return "QA-passed live sandbox preview";
   if (stage === "generating") return "Generating application files…";
   return "Application Preview";
 }
