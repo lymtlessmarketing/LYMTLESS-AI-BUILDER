@@ -1,12 +1,27 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppBlueprint } from "@/lib/ai/schemas";
 import { GithubControls } from "@/components/github-controls";
 
 type ChatMessage = { role: "user" | "assistant"; text: string };
-type BuildStage = "idle" | "planning" | "generating" | "provisioning" | "configuring" | "building" | "ready" | "failed";
+type BuildStage = "idle" | "planning" | "generating" | "provisioning" | "configuring" | "editing" | "building" | "ready" | "failed";
 type GenerationResult = { version: { id: string; number: number; summary: string }; files: string[] };
+type SelectionTarget = {
+  tag: string;
+  selector: string;
+  text: string;
+  id?: string | null;
+  classes: string[];
+  role?: string | null;
+  ariaLabel?: string | null;
+  name?: string | null;
+  inputType?: string | null;
+  sourceHint?: string | null;
+  route: string;
+  ancestors: Array<{ tag: string; id?: string | null; classes: string[] }>;
+  rect?: { x: number; y: number; width: number; height: number };
+};
 type SandboxBuildResult = {
   buildRunId: string;
   sandboxName: string;
@@ -28,6 +43,7 @@ type SandboxBuildResult = {
 };
 
 export function BuilderWorkspace({ projectId }: { projectId: string }) {
+  const previewRef = useRef<HTMLIFrameElement | null>(null);
   const [prompt, setPrompt] = useState("");
   const [blueprint, setBlueprint] = useState<AppBlueprint | null>(null);
   const [generation, setGeneration] = useState<GenerationResult | null>(null);
@@ -38,8 +54,25 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
   const [stage, setStage] = useState<BuildStage>("idle");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectionReady, setSelectionReady] = useState(false);
+  const [selectedTarget, setSelectedTarget] = useState<SelectionTarget | null>(null);
+  const [editInstruction, setEditInstruction] = useState("");
 
   const features = useMemo(() => blueprint?.features.slice(0, 3) ?? ["Dashboard", "Authentication", "Database"], [blueprint]);
+
+  const sendEditorCommand = useCallback((command: "set-mode" | "ping", enabled?: boolean) => {
+    previewRef.current?.contentWindow?.postMessage({
+      type: "LYMTLESS_EDITOR_COMMAND",
+      command,
+      enabled,
+    }, "*");
+  }, []);
+
+  const disableSelection = useCallback(() => {
+    setSelectionMode(false);
+    sendEditorCommand("set-mode", false);
+  }, [sendEditorCommand]);
 
   const runPipeline = useCallback(async (content: string) => {
     const clean = content.trim();
@@ -49,6 +82,10 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
     setError("");
     setGeneration(null);
     setSandboxBuild(null);
+    setSelectionMode(false);
+    setSelectionReady(false);
+    setSelectedTarget(null);
+    setEditInstruction("");
     setMessages((m) => [...m, { role: "user", text: clean }]);
     setPrompt("");
 
@@ -100,6 +137,90 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
     }
   }, [busy, projectId]);
 
+  const applySelectedEdit = useCallback(async () => {
+    const instruction = editInstruction.trim();
+    if (!selectedTarget || !sandboxBuild?.versionId || instruction.length < 2 || busy) return;
+
+    setBusy(true);
+    setError("");
+    disableSelection();
+    setMessages((m) => [...m, { role: "user", text: `Select & Edit — ${selectionLabel(selectedTarget)}: ${instruction}` }]);
+
+    try {
+      setStage("editing");
+      const edit = await postJson("/api/ai/edit-selection", {
+        projectId,
+        versionId: sandboxBuild.versionId,
+        instruction,
+        target: selectedTarget,
+      }, "Select & Edit failed");
+
+      setGeneration({ version: edit.version, files: edit.files });
+      setMessages((m) => [...m, {
+        role: "assistant",
+        text: `Targeted edit created version ${edit.version.number}. Changed ${edit.changedFiles.length} file${edit.changedFiles.length === 1 ? "" : "s"}: ${edit.changedFiles.join(", ")}. Running the complete QA pipeline now.`,
+      }]);
+
+      setSelectedTarget(null);
+      setEditInstruction("");
+      setSelectionReady(false);
+      setSandboxBuild(null);
+      setStage("building");
+
+      const buildData = await postJson("/api/build/run", { projectId }, "Edited version failed build or QA");
+      setSandboxBuild(buildData);
+      setStage("ready");
+      const scoreText = typeof buildData.visualQa?.score === "number" ? ` Visual quality score: ${buildData.visualQa.score}/100.` : "";
+      setMessages((m) => [...m, {
+        role: "assistant",
+        text: `Select & Edit passed build, browser QA, and visual QA.${scoreText} The updated preview is ready.`,
+      }]);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Select & Edit failed";
+      setStage("failed");
+      setError(message);
+      setMessages((m) => [...m, { role: "assistant", text: `Select & Edit error: ${message}` }]);
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, disableSelection, editInstruction, projectId, sandboxBuild?.versionId, selectedTarget]);
+
+  const toggleSelectionMode = useCallback(() => {
+    if (!sandboxBuild?.previewUrl || !selectionReady || busy) return;
+    const next = !selectionMode;
+    setSelectionMode(next);
+    if (next) setSelectedTarget(null);
+    sendEditorCommand("set-mode", next);
+  }, [busy, sandboxBuild?.previewUrl, selectionMode, selectionReady, sendEditorCommand]);
+
+  const handlePreviewLoad = useCallback(() => {
+    setSelectionReady(false);
+    sendEditorCommand("ping");
+  }, [sendEditorCommand]);
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== previewRef.current?.contentWindow) return;
+      const data = event.data;
+      if (!data || data.type !== "LYMTLESS_EDITOR_EVENT") return;
+
+      if (data.event === "ready") {
+        setSelectionReady(true);
+        if (selectionMode) sendEditorCommand("set-mode", true);
+        return;
+      }
+
+      if (data.event === "selected" && isSelectionTarget(data.payload)) {
+        setSelectedTarget(data.payload);
+        setSelectionMode(false);
+        sendEditorCommand("set-mode", false);
+      }
+    };
+
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [selectionMode, sendEditorCommand]);
+
   useEffect(() => {
     const initial = sessionStorage.getItem(`initial-prompt:${projectId}`);
     if (!initial) return;
@@ -130,10 +251,28 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
         </aside>
 
         <section className="preview-wrap">
-          <div className="preview-toolbar"><span className="status">{previewStatus(stage)}</span><span className="badge">{generation ? `VERSION ${generation.version.number}` : "Desktop"}</span></div>
+          <div className="preview-toolbar">
+            <span className="status">{selectionMode ? "Click the exact element you want to edit" : previewStatus(stage)}</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {sandboxBuild?.previewUrl ? (
+                <button className="secondary-btn" type="button" disabled={busy || !selectionReady} onClick={toggleSelectionMode}>
+                  {selectionMode ? "Cancel Select" : selectionReady ? "Select & Edit" : "Loading Editor…"}
+                </button>
+              ) : null}
+              <span className="badge">{generation ? `VERSION ${generation.version.number}` : "Desktop"}</span>
+            </div>
+          </div>
           <div className="preview-canvas">
             {sandboxBuild?.previewUrl ? (
-              <iframe className="live-preview-frame" src={sandboxBuild.previewUrl} title="Generated application live preview" sandbox="allow-scripts allow-forms allow-popups allow-same-origin" referrerPolicy="no-referrer" />
+              <iframe
+                ref={previewRef}
+                className="live-preview-frame"
+                src={sandboxBuild.previewUrl}
+                title="Generated application live preview"
+                sandbox="allow-scripts allow-forms allow-popups allow-same-origin"
+                referrerPolicy="no-referrer"
+                onLoad={handlePreviewLoad}
+              />
             ) : (
               <div className="browser">
                 <div className="browser-top"><span className="dot"/><span className="dot"/><span className="dot"/></div>
@@ -158,8 +297,34 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
             {stage === "generating" && <div className="message ai">Writing the complete application code bundle…</div>}
             {stage === "provisioning" && <div className="message ai">Creating the app’s isolated database/auth/storage project…</div>}
             {stage === "configuring" && <div className="message ai">Applying guarded SQL/RLS and running backend security checks…</div>}
+            {stage === "editing" && <div className="message ai">Applying a targeted source edit to the selected component…</div>}
             {stage === "building" && <div className="message ai">Installing, compiling, launching the preview, running browser QA, reviewing screenshots with AI, and repairing supported defects if necessary…</div>}
           </div>
+
+          {selectedTarget ? (
+            <div style={{ borderTop: "1px solid var(--line)", padding: 14, display: "grid", gap: 10 }}>
+              <div>
+                <div className="side-title" style={{ margin: 0 }}>SELECTED ELEMENT</div>
+                <strong>{selectionLabel(selectedTarget)}</strong>
+                <div className="status" style={{ marginTop: 4 }}>{selectedTarget.text || selectedTarget.selector}</div>
+              </div>
+              <textarea
+                value={editInstruction}
+                onChange={(event) => setEditInstruction(event.target.value)}
+                placeholder="Describe exactly what you want changed on this selected element…"
+                style={{ minHeight: 88 }}
+              />
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="primary-btn" type="button" disabled={busy || editInstruction.trim().length < 2} onClick={() => void applySelectedEdit()}>
+                  {stage === "editing" || stage === "building" ? "Applying…" : "Apply Edit"}
+                </button>
+                <button className="secondary-btn" type="button" disabled={busy} onClick={() => { setSelectedTarget(null); setEditInstruction(""); }}>
+                  Clear
+                </button>
+              </div>
+            </div>
+          ) : null}
+
           <div className="composer">
             <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={generation ? "Describe the next change…" : "Build a CRM, booking system, client portal…"} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void runPipeline(prompt); } }} />
             <div className="composer-row"><button className="primary-btn" disabled={busy || prompt.trim().length < 10} onClick={() => void runPipeline(prompt)}>{busy ? 'Building…' : generation ? 'Build New Version' : 'Build App'}</button></div>
@@ -198,11 +363,29 @@ async function provisionBackend(projectId: string) {
   throw new Error("Backend provisioning is still in progress; try the build again shortly");
 }
 
+function isSelectionTarget(value: unknown): value is SelectionTarget {
+  if (!value || typeof value !== "object") return false;
+  const target = value as Partial<SelectionTarget>;
+  return typeof target.tag === "string"
+    && typeof target.selector === "string"
+    && typeof target.text === "string"
+    && typeof target.route === "string"
+    && Array.isArray(target.classes)
+    && Array.isArray(target.ancestors);
+}
+
+function selectionLabel(target: SelectionTarget) {
+  const identity = target.id ? `#${target.id}` : target.classes.length ? `.${target.classes[0]}` : "";
+  const text = target.text ? ` — ${target.text.slice(0, 70)}${target.text.length > 70 ? "…" : ""}` : "";
+  return `<${target.tag}${identity}>${text}`;
+}
+
 function stageLabel(stage: BuildStage) {
   if (stage === "planning") return "Architecture agent";
   if (stage === "generating") return "Code-generation agent";
   if (stage === "provisioning") return "Backend provisioning";
   if (stage === "configuring") return "Backend security + schema";
+  if (stage === "editing") return "Targeted component edit";
   if (stage === "building") return "Sandbox + browser + visual QA";
   if (stage === "ready") return "Live preview ready";
   if (stage === "failed") return "Build failed";
@@ -212,6 +395,7 @@ function stageLabel(stage: BuildStage) {
 function previewStatus(stage: BuildStage) {
   if (stage === "provisioning") return "Provisioning isolated app backend…";
   if (stage === "configuring") return "Configuring database and RLS…";
+  if (stage === "editing") return "Editing selected component…";
   if (stage === "building") return "Building and visually validating isolated preview…";
   if (stage === "ready") return "QA-passed live sandbox preview";
   if (stage === "generating") return "Generating application files…";
