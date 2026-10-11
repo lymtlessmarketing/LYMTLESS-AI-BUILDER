@@ -14,21 +14,31 @@ const BLOCKED_PATTERNS: Array<[RegExp, string]> = [
   [/\b(insert\s+into|update|delete\s+from|truncate(?:\s+table)?)\s+(?:"?(?:auth|storage|vault|extensions|supabase_[a-z0-9_]*)"?)\./i, "data in Supabase-managed schemas cannot be modified by generated migrations"],
 ];
 
-// Automatic DEV-branch evolution is deliberately additive-first. These operations can destroy,
-// rewrite, or reinterpret production data, so they require a future explicit human-review flow.
-const MANUAL_REVIEW_PATTERNS: Array<[RegExp, string]> = [
+// Preview branches are data-less by default. Therefore automatic production evolution is limited
+// to changes whose safety does not depend on the contents of production rows. Everything below
+// is valid SQL, but requires an explicit human-reviewed migration path before production merge.
+const EVOLUTION_MANUAL_REVIEW_PATTERNS: Array<[RegExp, string]> = [
   [/\bdrop\s+(table|schema|view|materialized\s+view|function|type|domain|sequence)\b/i, "DROP operations require manual review"],
   [/\balter\s+table\b[\s\S]*?\bdrop\s+(column|constraint)\b/i, "dropping columns or constraints requires manual review"],
   [/\balter\s+table\b[\s\S]*?\brename\s+(column|to)\b/i, "renaming tables or columns requires manual review"],
   [/\balter\s+table\b[\s\S]*?\balter\s+column\b[\s\S]*?\btype\b/i, "column type changes require manual review"],
+  [/\balter\s+table\b[\s\S]*?\balter\s+column\b[\s\S]*?\bset\s+not\s+null\b/i, "SET NOT NULL requires production-data validation"],
+  [/\balter\s+table\b[\s\S]*?\badd\s+(?:constraint\s+)?(?:unique|foreign\s+key|primary\s+key|check)\b/i, "new data-validating constraints require manual review"],
+  [/\balter\s+table\b[\s\S]*?\badd\s+column\b[\s\S]*?\bnot\s+null\b/i, "adding a NOT NULL column requires production-data validation"],
+  [/\bcreate\s+unique\s+index\b/i, "unique indexes require production-data validation"],
   [/\btruncate(?:\s+table)?\b/i, "TRUNCATE requires manual review"],
+  [/\binsert\s+into\b/i, "INSERT data migrations require manual review"],
   [/\bdelete\s+from\b/i, "DELETE data migrations require manual review"],
   [/\bupdate\s+(?:public\.)?"?[a-zA-Z_][a-zA-Z0-9_]*"?\s+set\b/i, "UPDATE data migrations require manual review"],
 ];
 
 const ALLOWED_EXTENSIONS = new Set(["pgcrypto", "uuid-ossp", "pg_trgm", "vector", "citext", "unaccent"]);
 
-export function validateGeneratedMigration(sql: string) {
+type MigrationSafetyOptions = {
+  mode?: "initial" | "evolution";
+};
+
+export function validateGeneratedMigration(sql: string, options: MigrationSafetyOptions = {}) {
   if (!sql.trim()) throw new Error("Migration is empty");
   if (sql.length > 500_000) throw new Error("Migration exceeds the 500 KB SQL limit");
 
@@ -36,8 +46,10 @@ export function validateGeneratedMigration(sql: string) {
     if (pattern.test(sql)) throw new Error(`Unsafe generated migration: ${reason}`);
   }
 
-  for (const [pattern, reason] of MANUAL_REVIEW_PATTERNS) {
-    if (pattern.test(sql)) throw new Error(`Automatic schema evolution blocked: ${reason}`);
+  if (options.mode === "evolution") {
+    for (const [pattern, reason] of EVOLUTION_MANUAL_REVIEW_PATTERNS) {
+      if (pattern.test(sql)) throw new Error(`Automatic schema evolution blocked: ${reason}`);
+    }
   }
 
   const extensionMatches = sql.matchAll(/\bcreate\s+extension(?:\s+if\s+not\s+exists)?\s+"?([a-zA-Z0-9_-]+)"?/gi);
