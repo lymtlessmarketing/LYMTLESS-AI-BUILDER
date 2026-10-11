@@ -22,11 +22,19 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 const requestSchema = z.object({ projectId: z.string().uuid() });
+const ACTIVE_SCHEMA_RUN_STATUSES = new Set(["creating", "applying", "validating", "merging"]);
 
 type Migration = {
   path: string;
   content: string;
   contentHash: string;
+};
+
+type SchemaRunRecord = {
+  id: string;
+  status: string;
+  branch_ref: string | null;
+  branch_project_ref: string | null;
 };
 
 export async function POST(request: Request) {
@@ -192,21 +200,12 @@ async function evolveSchemaOnBranch(options: {
   setSchemaRunId: (value: string) => void;
 }) {
   const branchName = schemaBranchName(options.projectId, options.sourceVersionId);
-  const { data: schemaRun, error: schemaRunError } = await options.supabase
-    .from("backend_schema_runs")
-    .upsert({
-      app_backend_id: options.backend.id,
-      project_id: options.projectId,
-      source_version_id: options.sourceVersionId,
-      user_id: options.userId,
-      branch_name: branchName,
-      status: "creating",
-      error_message: null,
-    }, { onConflict: "app_backend_id,source_version_id" })
-    .select("id")
-    .single();
-  if (schemaRunError || !schemaRun) throw new Error(schemaRunError?.message || "Could not create schema evolution run");
+  const schemaRun = await claimSchemaRun({ ...options, branchName });
   options.setSchemaRunId(schemaRun.id);
+
+  if (schemaRun.branch_project_ref || schemaRun.branch_ref) {
+    await removeBranchIfPresent(schemaRun.branch_project_ref || schemaRun.branch_ref!);
+  }
 
   await ensureDatabaseBranch(options.backend.external_project_ref, branchName);
   const branch = await waitForDatabaseBranch(options.backend.external_project_ref, branchName);
@@ -278,6 +277,65 @@ async function evolveSchemaOnBranch(options: {
   return { branchName, merged: true, workflowRunId: merge.workflow_run_id };
 }
 
+async function claimSchemaRun(options: {
+  supabase: Awaited<ReturnType<typeof createClient>>;
+  backend: { id: string };
+  projectId: string;
+  userId: string;
+  sourceVersionId: string;
+  branchName: string;
+}): Promise<SchemaRunRecord> {
+  const payload = {
+    app_backend_id: options.backend.id,
+    project_id: options.projectId,
+    source_version_id: options.sourceVersionId,
+    user_id: options.userId,
+    branch_name: options.branchName,
+    status: "creating",
+    error_message: null,
+  };
+
+  const { data: inserted, error: insertError } = await options.supabase
+    .from("backend_schema_runs")
+    .insert(payload)
+    .select("id,status,branch_ref,branch_project_ref")
+    .maybeSingle();
+  if (inserted) return inserted as SchemaRunRecord;
+
+  const { data: existing, error: existingError } = await options.supabase
+    .from("backend_schema_runs")
+    .select("id,status,branch_ref,branch_project_ref")
+    .eq("app_backend_id", options.backend.id)
+    .eq("source_version_id", options.sourceVersionId)
+    .maybeSingle();
+  if (existingError || !existing) throw new Error(insertError?.message || existingError?.message || "Could not claim schema evolution run");
+  if (ACTIVE_SCHEMA_RUN_STATUSES.has(existing.status)) throw new Error("Schema evolution is already in progress for this application version");
+  if (existing.status === "merged") throw new Error("Schema evolution is already marked merged but unapplied migration hashes remain");
+
+  const { data: claimed, error: claimError } = await options.supabase
+    .from("backend_schema_runs")
+    .update({
+      branch_name: options.branchName,
+      branch_ref: null,
+      branch_project_ref: null,
+      status: "creating",
+      error_message: null,
+      validation_log: null,
+      diff_payload: {},
+      security_findings: [],
+      merge_workflow_run_id: null,
+      merged_at: null,
+    })
+    .eq("id", existing.id)
+    .eq("status", existing.status)
+    .select("id,status,branch_ref,branch_project_ref")
+    .maybeSingle();
+  if (claimError) throw new Error(claimError.message);
+  if (!claimed) throw new Error("Schema evolution was claimed by another request");
+
+  return { ...(claimed as SchemaRunRecord), branch_ref: existing.branch_ref, branch_project_ref: existing.branch_project_ref };
+}
+
 async function trackMigration(
   options: {
     supabase: Awaited<ReturnType<typeof createClient>>;
@@ -337,9 +395,17 @@ async function cleanupBranch(
     await deleteDatabaseBranch(branchRef);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Branch cleanup failed";
-    // Supabase may remove an ephemeral branch automatically after a successful merge.
     if (/Management API 404:/.test(message)) return;
     await supabase.from("backend_schema_runs").update({ status: "cleanup_failed", error_message: clip(message) }).eq("id", schemaRunId);
+  }
+}
+
+async function removeBranchIfPresent(branchRef: string) {
+  try {
+    await deleteDatabaseBranch(branchRef);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Branch cleanup failed";
+    if (!/Management API 404:/.test(message)) throw error;
   }
 }
 
