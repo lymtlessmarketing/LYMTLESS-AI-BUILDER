@@ -6,15 +6,22 @@ import { ARCHITECT_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { appBlueprintSchema } from "@/lib/ai/schemas";
 import { createClient } from "@/lib/supabase/server";
 
+export const runtime = "nodejs";
+
 const requestSchema = z.object({
   projectId: z.string().uuid(),
   prompt: z.string().trim().min(10).max(20_000),
 });
 
 export async function POST(request: Request) {
+  const supabase = await createClient();
+  let runId: string | null = null;
+  let projectId: string | null = null;
+
   try {
     const body = requestSchema.parse(await request.json());
-    const supabase = await createClient();
+    projectId = body.projectId;
+
     const { data: authData } = await supabase.auth.getUser();
     const user = authData.user;
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -34,14 +41,15 @@ export async function POST(request: Request) {
 
     const model = process.env.OPENAI_MODEL || "gpt-6.1-sol";
 
-    await supabase.from("messages").insert({
+    const { error: userMessageError } = await supabase.from("messages").insert({
       project_id: body.projectId,
       user_id: user.id,
       role: "user",
       content: body.prompt,
     });
+    if (userMessageError) console.warn("User message audit write failed:", userMessageError.message);
 
-    const { data: run } = await supabase
+    const { data: run, error: runError } = await supabase
       .from("ai_runs")
       .insert({
         project_id: body.projectId,
@@ -52,6 +60,8 @@ export async function POST(request: Request) {
       })
       .select("id")
       .single();
+    if (runError) console.warn("AI run audit creation failed:", runError.message);
+    runId = run?.id ?? null;
 
     const client = new OpenAI({ apiKey });
     const response = await client.responses.parse({
@@ -66,17 +76,17 @@ export async function POST(request: Request) {
     });
 
     const blueprint = response.output_parsed;
-    if (!blueprint) {
-      if (run?.id) {
-        await supabase
-          .from("ai_runs")
-          .update({ status: "failed", error_message: "Model returned no parsed blueprint" })
-          .eq("id", run.id);
-      }
-      return NextResponse.json({ error: "AI did not return a valid application blueprint" }, { status: 502 });
-    }
+    if (!blueprint) throw new Error("AI did not return a valid application blueprint");
 
-    await Promise.all([
+    const { error: projectUpdateError } = await supabase.from("projects").update({
+      name: blueprint.name,
+      description: blueprint.summary,
+      blueprint,
+      status: "planned",
+    }).eq("id", body.projectId);
+    if (projectUpdateError) throw new Error(projectUpdateError.message);
+
+    const auditResults = await Promise.all([
       supabase.from("messages").insert({
         project_id: body.projectId,
         user_id: user.id,
@@ -84,26 +94,27 @@ export async function POST(request: Request) {
         content: `Created architecture blueprint for ${blueprint.name}.`,
         metadata: { blueprint },
       }),
-      supabase.from("projects").update({
-        name: blueprint.name,
-        description: blueprint.summary,
-        status: "planned",
-      }).eq("id", body.projectId),
-      ...(run?.id
-        ? [supabase.from("ai_runs").update({
+      runId
+        ? supabase.from("ai_runs").update({
             status: "succeeded",
             input_tokens: response.usage?.input_tokens ?? null,
             output_tokens: response.usage?.output_tokens ?? null,
-          }).eq("id", run.id)]
-        : []),
+          }).eq("id", runId)
+        : Promise.resolve({ error: null }),
     ]);
+    auditResults.forEach((result) => {
+      if (result.error) console.warn("Planning audit write failed:", result.error.message);
+    });
 
     return NextResponse.json({ blueprint });
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to create application plan";
+    if (runId) await supabase.from("ai_runs").update({ status: "failed", error_message: message }).eq("id", runId);
+    if (projectId) await supabase.from("projects").update({ status: "failed" }).eq("id", projectId);
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Invalid request", details: error.issues }, { status: 400 });
     }
     console.error(error);
-    return NextResponse.json({ error: "Unable to create application plan" }, { status: 500 });
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
