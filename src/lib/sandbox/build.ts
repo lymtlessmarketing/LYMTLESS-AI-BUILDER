@@ -26,14 +26,24 @@ export function sandboxAuthConfigured() {
   );
 }
 
-export async function createBuildSandbox() {
+export async function createBuildSandbox(env: Record<string, string> = {}) {
+  const tokenAuth =
+    process.env.VERCEL_TOKEN && process.env.VERCEL_TEAM_ID && process.env.VERCEL_PROJECT_ID
+      ? {
+          token: process.env.VERCEL_TOKEN,
+          teamId: process.env.VERCEL_TEAM_ID,
+          projectId: process.env.VERCEL_PROJECT_ID,
+        }
+      : {};
+
   return Sandbox.create({
-    runtime: "node24",
     persistent: false,
     timeout: 30 * 60 * 1000,
     ports: [PREVIEW_PORT],
     resources: { vcpus: 2 },
     networkPolicy: "allow-all",
+    env,
+    ...tokenAuth,
   });
 }
 
@@ -109,7 +119,7 @@ export async function buildApplication(sandbox: Sandbox) {
 }
 
 export async function startPreview(sandbox: Sandbox) {
-  await sandbox.updateNetworkPolicy("deny-all");
+  await sandbox.update({ networkPolicy: "deny-all" });
 
   const start = await runCaptured(sandbox, "bash", [
     "-lc",
