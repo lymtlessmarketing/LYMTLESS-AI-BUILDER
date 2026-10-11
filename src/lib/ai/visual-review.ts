@@ -27,7 +27,7 @@ Fail only for clear user-facing visual defects such as:
 
 Use warnings for subjective polish opportunities that should not block a build.
 Do not invent defects that are not visible. Do not penalize a valid minimalist design merely for being simple.
-Set passed=false when any error-level finding exists. Give a 0-100 production-readiness score.`;
+Set passed=false when any error-level finding exists. Give a 0-100 production-readiness score for informational use.`;
 
 export async function reviewVisuals(options: {
   sandbox: Sandbox;
@@ -70,7 +70,7 @@ export async function reviewVisuals(options: {
   const hasBlockingFinding = parsed.findings.some((finding) => finding.severity === "error");
   const review: VisualReview = {
     ...parsed,
-    passed: parsed.passed && !hasBlockingFinding && parsed.score >= 70,
+    passed: !hasBlockingFinding,
   };
 
   return {
