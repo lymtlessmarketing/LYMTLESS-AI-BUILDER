@@ -69,6 +69,7 @@ export async function POST(request: Request) {
     if (projectError || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
     if (!project.current_version_id) return NextResponse.json({ error: "Generate an application version first" }, { status: 409 });
 
+    const qaRoutes = blueprintRoutes(project.blueprint);
     let currentVersionId = project.current_version_id as string;
     let files = await loadVersionFiles(supabase, currentVersionId);
     if (!files.some((file) => file.path === "package.json")) {
@@ -178,7 +179,7 @@ export async function POST(request: Request) {
         version_id: currentVersionId,
       });
 
-      const qa = await runBrowserQa(sandbox);
+      const qa = await runBrowserQa(sandbox, qaRoutes);
       qaFindings = qa.result.findings;
       qaLog = appendAttemptLog(qaLog, repairAttempts + 1, "Playwright browser QA", qa.log);
       await updateBuildRun(supabase, buildRunId, {
@@ -223,12 +224,7 @@ export async function POST(request: Request) {
         const visual = await reviewVisuals({ sandbox, blueprint: project.blueprint });
         visualFindings = visual.review.findings;
         visualScore = visual.review.score;
-        visualLog = appendAttemptLog(
-          visualLog,
-          repairAttempts + 1,
-          "AI visual QA",
-          JSON.stringify(visual.review, null, 2),
-        );
+        visualLog = appendAttemptLog(visualLog, repairAttempts + 1, "AI visual QA", JSON.stringify(visual.review, null, 2));
 
         await updateBuildRun(supabase, buildRunId, {
           visual_status: visual.review.passed ? "passed" : "failed",
@@ -239,11 +235,7 @@ export async function POST(request: Request) {
         if (visualRun.data?.id) {
           await supabase
             .from("ai_runs")
-            .update({
-              status: "succeeded",
-              input_tokens: visual.inputTokens,
-              output_tokens: visual.outputTokens,
-            })
+            .update({ status: "succeeded", input_tokens: visual.inputTokens, output_tokens: visual.outputTokens })
             .eq("id", visualRun.data.id);
         }
 
@@ -267,10 +259,7 @@ export async function POST(request: Request) {
       } catch (visualError) {
         const message = visualError instanceof Error ? visualError.message : "Visual QA failed";
         if (visualRun.data?.id) {
-          await supabase
-            .from("ai_runs")
-            .update({ status: "failed", error_message: clipLog(message, 10_000) })
-            .eq("id", visualRun.data.id);
+          await supabase.from("ai_runs").update({ status: "failed", error_message: clipLog(message, 10_000) }).eq("id", visualRun.data.id);
         }
         throw visualError;
       }
@@ -301,7 +290,7 @@ export async function POST(request: Request) {
       previewUrl,
       repairAttempts,
       backendConnected: Object.keys(sandboxEnv).length > 0,
-      qa: { passed: true, findings: qaFindings },
+      qa: { passed: true, findings: qaFindings, routes: qaRoutes },
       visualQa: { passed: true, score: visualScore, findings: visualFindings },
       installLog,
       buildLog,
@@ -353,21 +342,12 @@ async function repairFailure(options: RepairFailureOptions) {
   }
 
   const nextAttempt = options.repairAttempts + 1;
-  await updateBuildRun(options.supabase, options.buildRunId, {
-    status: "repairing",
-    repair_attempts: nextAttempt,
-  });
+  await updateBuildRun(options.supabase, options.buildRunId, { status: "repairing", repair_attempts: nextAttempt });
 
   const model = process.env.OPENAI_REPAIR_MODEL || process.env.OPENAI_CODE_MODEL || process.env.OPENAI_MODEL || "gpt-6.1-sol";
   const repairRun = await options.supabase
     .from("ai_runs")
-    .insert({
-      project_id: options.projectId,
-      user_id: options.userId,
-      run_type: "repair",
-      model,
-      status: "running",
-    })
+    .insert({ project_id: options.projectId, user_id: options.userId, run_type: "repair", model, status: "running" })
     .select("id")
     .single();
 
@@ -428,6 +408,20 @@ async function repairFailure(options: RepairFailureOptions) {
     }
     throw repairError;
   }
+}
+
+function blueprintRoutes(blueprint: unknown): string[] {
+  if (!blueprint || typeof blueprint !== "object" || !("pages" in blueprint)) return ["/"];
+  const pages = (blueprint as { pages?: unknown }).pages;
+  if (!Array.isArray(pages)) return ["/"];
+
+  const routes: string[] = [];
+  for (const page of pages) {
+    if (!page || typeof page !== "object" || !("route" in page)) continue;
+    const route = (page as { route?: unknown }).route;
+    if (typeof route === "string") routes.push(route);
+  }
+  return routes.length ? routes : ["/"];
 }
 
 async function loadVersionFiles(supabase: SupabaseClient, versionId: string): Promise<SourceFile[]> {
