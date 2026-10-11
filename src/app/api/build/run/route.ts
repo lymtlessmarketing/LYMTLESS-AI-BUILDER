@@ -81,8 +81,11 @@ export async function POST(request: Request) {
       .select("status,api_url,publishable_key")
       .eq("project_id", requestedProjectId)
       .maybeSingle();
-    const sandboxEnv = backend?.status === "ready" && backend.api_url && backend.publishable_key
-      ? { VITE_SUPABASE_URL: backend.api_url, VITE_SUPABASE_PUBLISHABLE_KEY: backend.publishable_key }
+    const sandboxEnv: Record<string, string> = backend?.status === "ready" && backend.api_url && backend.publishable_key
+      ? {
+          VITE_SUPABASE_URL: String(backend.api_url),
+          VITE_SUPABASE_PUBLISHABLE_KEY: String(backend.publishable_key),
+        }
       : {};
 
     const { data: buildRun, error: buildRunError } = await supabase
@@ -98,10 +101,11 @@ export async function POST(request: Request) {
       .select("id")
       .single();
     if (buildRunError || !buildRun) throw new Error(buildRunError?.message || "Could not create build run");
-    buildRunId = buildRun.id;
+    const activeBuildRunId = String(buildRun.id);
+    buildRunId = activeBuildRunId;
 
     sandbox = await createBuildSandbox(sandboxEnv);
-    await updateBuildRun(supabase, buildRunId, { sandbox_name: sandbox.name, status: "installing" });
+    await updateBuildRun(supabase, activeBuildRunId, { sandbox_name: sandbox.name, status: "installing" });
     await writeSourceFiles(sandbox, files);
 
     let repairAttempts = 0;
@@ -116,17 +120,17 @@ export async function POST(request: Request) {
     let previewUrl = "";
 
     while (true) {
-      await updateBuildRun(supabase, buildRunId, { status: "installing", repair_attempts: repairAttempts });
+      await updateBuildRun(supabase, activeBuildRunId, { status: "installing", repair_attempts: repairAttempts });
       const install = await installDependencies(sandbox);
       installLog = appendAttemptLog(installLog, repairAttempts + 1, "npm install", install.combined);
-      await updateBuildRun(supabase, buildRunId, { install_log: installLog });
+      await updateBuildRun(supabase, activeBuildRunId, { install_log: installLog });
 
       if (install.exitCode !== 0) {
         const failure = `DEPENDENCY INSTALL FAILED\n${install.combined}`;
         ({ files, currentVersionId, repairAttempts } = await repairFailure({
           supabase,
           sandbox,
-          buildRunId,
+          buildRunId: activeBuildRunId,
           projectId: requestedProjectId,
           userId: user.id,
           blueprint: project.blueprint,
@@ -139,17 +143,17 @@ export async function POST(request: Request) {
         continue;
       }
 
-      await updateBuildRun(supabase, buildRunId, { status: "building" });
+      await updateBuildRun(supabase, activeBuildRunId, { status: "building" });
       const build = await buildApplication(sandbox);
       buildLog = appendAttemptLog(buildLog, repairAttempts + 1, "npm run build", build.combined);
-      await updateBuildRun(supabase, buildRunId, { build_log: buildLog });
+      await updateBuildRun(supabase, activeBuildRunId, { build_log: buildLog });
 
       if (build.exitCode !== 0) {
         const failure = `APPLICATION BUILD FAILED\n${build.combined}`;
         ({ files, currentVersionId, repairAttempts } = await repairFailure({
           supabase,
           sandbox,
-          buildRunId,
+          buildRunId: activeBuildRunId,
           projectId: requestedProjectId,
           userId: user.id,
           blueprint: project.blueprint,
@@ -162,14 +166,14 @@ export async function POST(request: Request) {
         continue;
       }
 
-      await updateBuildRun(supabase, buildRunId, { status: "starting", version_id: currentVersionId });
+      await updateBuildRun(supabase, activeBuildRunId, { status: "starting", version_id: currentVersionId });
       const qaInstallLog = await installBrowserQa(sandbox);
       qaLog = appendAttemptLog(qaLog, repairAttempts + 1, "install Playwright/Chromium", qaInstallLog);
 
       const preview = await startPreview(sandbox);
       previewUrl = preview.previewUrl;
       previewLog = appendAttemptLog(previewLog, repairAttempts + 1, "Vite preview", preview.previewLog);
-      await updateBuildRun(supabase, buildRunId, {
+      await updateBuildRun(supabase, activeBuildRunId, {
         status: "testing",
         qa_status: "running",
         visual_status: "pending",
@@ -182,7 +186,7 @@ export async function POST(request: Request) {
       const qa = await runBrowserQa(sandbox, qaRoutes);
       qaFindings = qa.result.findings;
       qaLog = appendAttemptLog(qaLog, repairAttempts + 1, "Playwright browser QA", qa.log);
-      await updateBuildRun(supabase, buildRunId, {
+      await updateBuildRun(supabase, activeBuildRunId, {
         qa_status: qa.result.passed ? "passed" : "failed",
         qa_log: qaLog,
         qa_findings: qaFindings,
@@ -194,7 +198,7 @@ export async function POST(request: Request) {
         ({ files, currentVersionId, repairAttempts } = await repairFailure({
           supabase,
           sandbox,
-          buildRunId,
+          buildRunId: activeBuildRunId,
           projectId: requestedProjectId,
           userId: user.id,
           blueprint: project.blueprint,
@@ -207,7 +211,7 @@ export async function POST(request: Request) {
         continue;
       }
 
-      await updateBuildRun(supabase, buildRunId, { visual_status: "running" });
+      await updateBuildRun(supabase, activeBuildRunId, { visual_status: "running" });
       const visualRun = await supabase
         .from("ai_runs")
         .insert({
@@ -226,7 +230,7 @@ export async function POST(request: Request) {
         visualScore = visual.review.score;
         visualLog = appendAttemptLog(visualLog, repairAttempts + 1, "AI visual QA", JSON.stringify(visual.review, null, 2));
 
-        await updateBuildRun(supabase, buildRunId, {
+        await updateBuildRun(supabase, activeBuildRunId, {
           visual_status: visual.review.passed ? "passed" : "failed",
           visual_log: visualLog,
           visual_findings: visualFindings,
@@ -246,7 +250,7 @@ export async function POST(request: Request) {
         ({ files, currentVersionId, repairAttempts } = await repairFailure({
           supabase,
           sandbox,
-          buildRunId,
+          buildRunId: activeBuildRunId,
           projectId: requestedProjectId,
           userId: user.id,
           blueprint: project.blueprint,
@@ -268,7 +272,7 @@ export async function POST(request: Request) {
     await lockSandboxNetwork(sandbox);
     await supabase.from("versions").update({ status: "tested" }).eq("id", currentVersionId);
     await supabase.from("projects").update({ status: "ready" }).eq("id", requestedProjectId);
-    await updateBuildRun(supabase, buildRunId, {
+    await updateBuildRun(supabase, activeBuildRunId, {
       status: "ready",
       qa_status: "passed",
       qa_log: qaLog,
@@ -284,7 +288,7 @@ export async function POST(request: Request) {
     });
 
     return NextResponse.json({
-      buildRunId,
+      buildRunId: activeBuildRunId,
       sandboxName: sandbox.name,
       versionId: currentVersionId,
       previewUrl,

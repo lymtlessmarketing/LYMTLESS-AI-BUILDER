@@ -46,12 +46,16 @@ export function GithubControls({ projectId, versionId }: { projectId: string; ve
     }
   }, [projectId, refresh]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void refresh(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [refresh]);
 
   useEffect(() => {
     if (!versionId || !status?.connected || autoSyncedVersion.current === versionId) return;
     autoSyncedVersion.current = versionId;
-    void sync().catch(() => undefined);
+    const timer = window.setTimeout(() => { void sync().catch(() => undefined); }, 0);
+    return () => window.clearTimeout(timer);
   }, [status?.connected, sync, versionId]);
 
   if (!status?.connected) {
