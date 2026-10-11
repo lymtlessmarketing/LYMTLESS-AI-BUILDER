@@ -23,6 +23,7 @@ export const maxDuration = 300;
 
 const requestSchema = z.object({ projectId: z.string().uuid() });
 const ACTIVE_SCHEMA_RUN_STATUSES = new Set(["creating", "applying", "validating", "merging"]);
+const CLAIMABLE_BACKEND_STATUSES = ["ready", "healthy", "failed"];
 
 type Migration = {
   path: string;
@@ -42,6 +43,7 @@ export async function POST(request: Request) {
   let backendId: string | null = null;
   let schemaRunId: string | null = null;
   let sourceVersionId: string | null = null;
+  let ownsBackendConfiguration = false;
 
   try {
     const { projectId } = requestSchema.parse(await request.json());
@@ -80,7 +82,19 @@ export async function POST(request: Request) {
 
     const safetyMode = backend.schema_version_id ? "evolution" : "initial";
     pending.forEach((migration) => validateGeneratedMigration(migration.content, { mode: safetyMode }));
-    await supabase.from("app_backends").update({ status: "configuring", error_message: null }).eq("id", backend.id);
+
+    const { data: claimedBackend, error: backendClaimError } = await supabase
+      .from("app_backends")
+      .update({ status: "configuring", error_message: null })
+      .eq("id", backend.id)
+      .in("status", CLAIMABLE_BACKEND_STATUSES)
+      .select("id")
+      .maybeSingle();
+    if (backendClaimError) throw new Error(backendClaimError.message);
+    if (!claimedBackend) {
+      return NextResponse.json({ error: "Backend configuration is already in progress or the backend is not ready" }, { status: 409 });
+    }
+    ownsBackendConfiguration = true;
 
     if (!backend.schema_version_id) {
       await applyInitialSchema({ supabase, backend, projectId, userId: user.id, sourceVersionId: project.current_version_id, pending });
@@ -109,7 +123,7 @@ export async function POST(request: Request) {
     if (schemaRunId) {
       await supabase.from("backend_schema_runs").update({ status: "failed", error_message: clip(message) }).eq("id", schemaRunId);
     }
-    if (backendId) {
+    if (backendId && ownsBackendConfiguration) {
       await supabase.from("app_backends").update({ status: "failed", error_message: clip(message) }).eq("id", backendId);
       if (sourceVersionId) {
         await supabase
