@@ -23,6 +23,7 @@ import {
   type SourceFile,
   writeSourceFiles,
 } from "@/lib/sandbox/build";
+import { installSelectionBridge } from "@/lib/sandbox/select-bridge";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -120,6 +121,7 @@ export async function POST(request: Request) {
     let previewUrl = "";
 
     while (true) {
+      await installSelectionBridge(sandbox);
       await updateBuildRun(supabase, activeBuildRunId, { status: "installing", repair_attempts: repairAttempts });
       const install = await installDependencies(sandbox);
       installLog = appendAttemptLog(installLog, repairAttempts + 1, "npm install", install.combined);
