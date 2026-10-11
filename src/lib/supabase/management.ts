@@ -9,6 +9,18 @@ export type PlatformProject = {
   status?: string;
 };
 
+export type DatabaseBranch = {
+  id?: string;
+  name?: string;
+  project_ref?: string;
+  parent_project_ref?: string;
+  persistent?: boolean;
+  status?: string;
+  with_data?: boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
 type OrganizationProjectsResponse = {
   projects?: PlatformProject[];
   pagination?: { count?: number; limit?: number; offset?: number };
@@ -49,6 +61,76 @@ export async function createPlatformProject(options: { name: string; dbPassword:
       db_pass: options.dbPassword,
       region_selection: { type: "smartGroup", code: smartRegion },
     }),
+  });
+}
+
+export async function listDatabaseBranches(parentRef: string) {
+  return managementRequest<DatabaseBranch[]>(`/v1/projects/${encodeURIComponent(parentRef)}/branches`);
+}
+
+export async function getDatabaseBranch(parentRef: string, branchName: string) {
+  return managementRequest<DatabaseBranch>(
+    `/v1/projects/${encodeURIComponent(parentRef)}/branches/${encodeURIComponent(branchName)}`,
+  );
+}
+
+export async function createDatabaseBranch(
+  parentRef: string,
+  options: { branchName: string; persistent?: boolean; withData?: boolean },
+) {
+  return managementRequest<DatabaseBranch>(`/v1/projects/${encodeURIComponent(parentRef)}/branches`, {
+    method: "POST",
+    body: JSON.stringify({
+      branch_name: options.branchName,
+      persistent: options.persistent ?? false,
+      with_data: options.withData ?? false,
+    }),
+  });
+}
+
+export async function ensureDatabaseBranch(parentRef: string, branchName: string) {
+  try {
+    return await getDatabaseBranch(parentRef, branchName);
+  } catch (error) {
+    if (!isManagementNotFound(error)) throw error;
+    return createDatabaseBranch(parentRef, { branchName, persistent: false, withData: false });
+  }
+}
+
+export async function waitForDatabaseBranch(parentRef: string, branchName: string, timeoutMs = 180_000) {
+  const started = Date.now();
+  let branch: DatabaseBranch | null = null;
+
+  while (Date.now() - started < timeoutMs) {
+    try {
+      branch = await getDatabaseBranch(parentRef, branchName);
+      if (branch.project_ref) {
+        await waitForProjectHealthy(branch.project_ref, 45_000);
+        return branch;
+      }
+    } catch (error) {
+      if (!isManagementNotFound(error) && !isTransientHealthError(error)) throw error;
+    }
+    await sleep(2500);
+  }
+
+  throw new Error(`Supabase branch ${branchName} did not become healthy before timeout`);
+}
+
+export async function diffDatabaseBranch(branchRef: string) {
+  return managementRequest<unknown>(`/v1/branches/${encodeURIComponent(branchRef)}/diff?included_schemas=public&pgdelta=true`);
+}
+
+export async function mergeDatabaseBranch(branchRef: string) {
+  return managementRequest<{ workflow_run_id?: string; message?: string }>(
+    `/v1/branches/${encodeURIComponent(branchRef)}/merge`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+export async function deleteDatabaseBranch(branchRef: string) {
+  return managementRequest<{ message?: string }>(`/v1/branches/${encodeURIComponent(branchRef)}?force=true`, {
+    method: "DELETE",
   });
 }
 
@@ -103,6 +185,18 @@ export function securityFindings(payload: unknown): unknown[] {
     if (Array.isArray(result.lints)) return result.lints;
   }
   return [];
+}
+
+export function hasSchemaDiff(payload: unknown) {
+  if (typeof payload === "string") return payload.trim().length > 0;
+  if (!payload || typeof payload !== "object") return false;
+  const record = payload as Record<string, unknown>;
+  for (const key of ["diff", "sql", "migration", "changes"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return true;
+    if (Array.isArray(value) && value.length > 0) return true;
+  }
+  return Object.keys(record).length > 0;
 }
 
 async function managementRequest<T>(pathname: string, init: RequestInit = {}): Promise<T> {
@@ -162,6 +256,14 @@ function collectHealthServices(value: unknown, services: Array<{ healthy: boolea
     services.push({ healthy: record.healthy, status: record.status });
   }
   Object.values(record).forEach((item) => collectHealthServices(item, services));
+}
+
+function isManagementNotFound(error: unknown) {
+  return error instanceof Error && /Management API 404:/.test(error.message);
+}
+
+function isTransientHealthError(error: unknown) {
+  return error instanceof Error && /(Management API (404|409|429|5\d\d):|did not become healthy)/.test(error.message);
 }
 
 function safeJson(value: string): unknown {
