@@ -46,6 +46,20 @@ export const repairPatchSchema = z.object({
   })).min(1).max(24),
 });
 
+export const visualReviewSchema = z.object({
+  passed: z.boolean(),
+  score: z.number().int().min(0).max(100),
+  summary: z.string().min(1).max(2000),
+  findings: z.array(z.object({
+    severity: z.enum(["error", "warning"]),
+    viewport: z.enum(["desktop", "tablet", "mobile", "all"]),
+    category: z.enum(["layout", "responsiveness", "spacing", "typography", "contrast", "hierarchy", "imagery", "polish", "other"]),
+    issue: z.string().min(1).max(1600),
+    recommendation: z.string().min(1).max(1600),
+  })).max(30),
+});
+
 export type AppBlueprint = z.infer<typeof appBlueprintSchema>;
 export type GeneratedApp = z.infer<typeof generatedAppSchema>;
 export type RepairPatch = z.infer<typeof repairPatchSchema>;
+export type VisualReview = z.infer<typeof visualReviewSchema>;
