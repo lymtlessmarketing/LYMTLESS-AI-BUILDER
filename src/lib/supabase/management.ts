@@ -1,0 +1,186 @@
+const MANAGEMENT_API = "https://api.supabase.com";
+const MAX_ATTEMPTS = 4;
+
+export type PlatformProject = {
+  id?: string;
+  ref?: string;
+  name?: string;
+  region?: string;
+  status?: string;
+};
+
+type OrganizationProjectsResponse = {
+  projects?: PlatformProject[];
+  pagination?: { count?: number; limit?: number; offset?: number };
+};
+
+type ApiKeyRecord = {
+  id?: string;
+  type?: string;
+  name?: string;
+  api_key?: string;
+  disabled?: boolean;
+};
+
+export function managementConfigured() {
+  return Boolean(process.env.SUPABASE_MANAGEMENT_TOKEN && process.env.SUPABASE_PLATFORM_ORG_SLUG);
+}
+
+export function platformOrganizationSlug() {
+  const value = process.env.SUPABASE_PLATFORM_ORG_SLUG;
+  if (!value) throw new Error("SUPABASE_PLATFORM_ORG_SLUG is not configured");
+  return value;
+}
+
+export async function findPlatformProjectByName(name: string) {
+  const slug = encodeURIComponent(platformOrganizationSlug());
+  const params = new URLSearchParams({ limit: "20", offset: "0", search: name });
+  const response = await managementRequest<OrganizationProjectsResponse>(`/v1/organizations/${slug}/projects?${params.toString()}`);
+  return (response.projects || []).find((project) => project.name === name) || null;
+}
+
+export async function createPlatformProject(options: { name: string; dbPassword: string }) {
+  const smartRegion = process.env.SUPABASE_SMART_REGION || "americas";
+  return managementRequest<PlatformProject>("/v1/projects", {
+    method: "POST",
+    body: JSON.stringify({
+      name: options.name,
+      organization_slug: platformOrganizationSlug(),
+      db_pass: options.dbPassword,
+      region_selection: { type: "smartGroup", code: smartRegion },
+    }),
+  });
+}
+
+export async function waitForProjectHealthy(ref: string, timeoutMs = 180_000) {
+  const started = Date.now();
+
+  while (Date.now() - started < timeoutMs) {
+    const health = await managementRequest<unknown>(`/v1/projects/${encodeURIComponent(ref)}/health`);
+    if (healthIsReady(health)) return health;
+    await sleep(2500);
+  }
+
+  throw new Error(`Supabase project ${ref} did not become healthy before timeout`);
+}
+
+export async function ensurePublishableKey(ref: string) {
+  const path = `/v1/projects/${encodeURIComponent(ref)}/api-keys?reveal=true`;
+  let keys = await managementRequest<ApiKeyRecord[]>(path);
+  let publishable = keys.find((key) => key.type === "publishable" && !key.disabled && key.api_key);
+
+  if (!publishable) {
+    await managementRequest<ApiKeyRecord>(path, {
+      method: "POST",
+      body: JSON.stringify({ type: "publishable", name: "lymtless-default" }),
+    });
+    keys = await managementRequest<ApiKeyRecord[]>(path);
+    publishable = keys.find((key) => key.type === "publishable" && !key.disabled && key.api_key);
+  }
+
+  if (!publishable?.api_key) throw new Error(`Supabase project ${ref} has no usable publishable API key`);
+  return publishable.api_key;
+}
+
+export async function runDatabaseQuery(ref: string, query: string) {
+  return managementRequest<unknown>(`/v1/projects/${encodeURIComponent(ref)}/database/query`, {
+    method: "POST",
+    body: JSON.stringify({ query, read_only: false }),
+  });
+}
+
+export async function getSecurityAdvisor(ref: string) {
+  return managementRequest<unknown>(`/v1/projects/${encodeURIComponent(ref)}/advisors/security`);
+}
+
+export function securityFindings(payload: unknown): unknown[] {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return [];
+  const record = payload as Record<string, unknown>;
+  if (Array.isArray(record.lints)) return record.lints;
+  if (record.result && typeof record.result === "object") {
+    const result = record.result as Record<string, unknown>;
+    if (Array.isArray(result.lints)) return result.lints;
+  }
+  return [];
+}
+
+async function managementRequest<T>(pathname: string, init: RequestInit = {}): Promise<T> {
+  const token = process.env.SUPABASE_MANAGEMENT_TOKEN;
+  if (!token) throw new Error("SUPABASE_MANAGEMENT_TOKEN is not configured");
+
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(`${MANAGEMENT_API}${pathname}`, {
+        ...init,
+        cache: "no-store",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          ...(init.headers || {}),
+        },
+      });
+
+      const text = await response.text();
+      const payload = text ? safeJson(text) : null;
+      if (response.ok) return payload as T;
+
+      const detail = extractError(payload) || text || response.statusText;
+      const error = new Error(`Supabase Management API ${response.status}: ${detail}`);
+      if (response.status !== 429 && response.status < 500) throw error;
+      lastError = error;
+
+      const retryAfter = Number(response.headers.get("retry-after"));
+      const delay = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 500 * 2 ** attempt;
+      await sleep(Math.min(delay, 10_000));
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Supabase Management API request failed");
+      if (attempt === MAX_ATTEMPTS - 1 || /Management API 4\d\d:/.test(lastError.message)) break;
+      await sleep(500 * 2 ** attempt);
+    }
+  }
+
+  throw lastError || new Error("Supabase Management API request failed");
+}
+
+function healthIsReady(payload: unknown) {
+  const services: Array<{ healthy: boolean; status: string }> = [];
+  collectHealthServices(payload, services);
+  return services.length > 0 && services.every((service) => service.healthy && service.status === "ACTIVE_HEALTHY");
+}
+
+function collectHealthServices(value: unknown, services: Array<{ healthy: boolean; status: string }>) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectHealthServices(item, services));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  if (typeof record.healthy === "boolean" && typeof record.status === "string") {
+    services.push({ healthy: record.healthy, status: record.status });
+  }
+  Object.values(record).forEach((item) => collectHealthServices(item, services));
+}
+
+function safeJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function extractError(payload: unknown) {
+  if (!payload || typeof payload !== "object") return "";
+  const record = payload as Record<string, unknown>;
+  for (const key of ["message", "error", "msg", "detail"]) {
+    if (typeof record[key] === "string") return record[key] as string;
+  }
+  return "";
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

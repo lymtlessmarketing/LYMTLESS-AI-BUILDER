@@ -38,10 +38,7 @@ export async function POST(request: Request) {
 
     if (!sandboxAuthConfigured()) {
       return NextResponse.json(
-        {
-          error: "Vercel Sandbox authentication is not configured",
-          setup: "Use VERCEL_OIDC_TOKEN or VERCEL_TOKEN + VERCEL_TEAM_ID + VERCEL_PROJECT_ID.",
-        },
+        { error: "Vercel Sandbox authentication is not configured", setup: "Use VERCEL_OIDC_TOKEN or VERCEL_TOKEN + VERCEL_TEAM_ID + VERCEL_PROJECT_ID." },
         { status: 503 },
       );
     }
@@ -51,7 +48,6 @@ export async function POST(request: Request) {
       .select("id,current_version_id,blueprint")
       .eq("id", requestedProjectId)
       .single();
-
     if (projectError || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
     if (!project.current_version_id) return NextResponse.json({ error: "Generate an application version first" }, { status: 409 });
 
@@ -61,20 +57,24 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Generated application is missing package.json" }, { status: 422 });
     }
 
+    const { data: backend } = await supabase
+      .from("app_backends")
+      .select("status,api_url,publishable_key")
+      .eq("project_id", requestedProjectId)
+      .maybeSingle();
+    const sandboxEnv = backend?.status === "ready" && backend.api_url && backend.publishable_key
+      ? { VITE_SUPABASE_URL: backend.api_url, VITE_SUPABASE_PUBLISHABLE_KEY: backend.publishable_key }
+      : {};
+
     const { data: buildRun, error: buildRunError } = await supabase
       .from("build_runs")
-      .insert({
-        project_id: requestedProjectId,
-        version_id: currentVersionId,
-        user_id: user.id,
-        status: "creating",
-      })
+      .insert({ project_id: requestedProjectId, version_id: currentVersionId, user_id: user.id, status: "creating" })
       .select("id")
       .single();
     if (buildRunError || !buildRun) throw new Error(buildRunError?.message || "Could not create build run");
     buildRunId = buildRun.id;
 
-    sandbox = await createBuildSandbox();
+    sandbox = await createBuildSandbox(sandboxEnv);
     await updateBuildRun(supabase, buildRunId, { sandbox_name: sandbox.name, status: "installing" });
     await writeSourceFiles(sandbox, files);
 
@@ -101,14 +101,12 @@ export async function POST(request: Request) {
       }
 
       await supabase.from("versions").update({ status: "failed" }).eq("id", currentVersionId);
-
       if (repairAttempts >= MAX_REPAIRS) {
         throw new Error(`Application did not build after ${MAX_REPAIRS} automated repair attempts. ${clipLog(failureLog, 20_000)}`);
       }
 
       repairAttempts += 1;
       await updateBuildRun(supabase, buildRunId, { status: "repairing", repair_attempts: repairAttempts });
-
       const repairRun = await supabase
         .from("ai_runs")
         .insert({
@@ -123,15 +121,18 @@ export async function POST(request: Request) {
 
       try {
         const repair = await repairBuildFailure({ files, buildLog: failureLog, blueprint: project.blueprint });
-        const changedFiles = repair.patch.changes.map((change) => ({
-          path: safeSourcePath(change.path),
-          content: change.content,
-          content_hash: createHash("sha256").update(change.content, "utf8").digest("hex"),
-        }));
+        const changedFiles = repair.patch.changes.map((change) => {
+          const safePath = safeSourcePath(change.path);
+          if (safePath.startsWith("supabase/migrations/")) throw new Error("Build repair cannot modify database migrations");
+          return {
+            path: safePath,
+            content: change.content,
+            content_hash: createHash("sha256").update(change.content, "utf8").digest("hex"),
+          };
+        });
 
         files = applyRepair(files, changedFiles);
         validateBundleSize(files);
-
         const { data: version, error: versionError } = await supabase.rpc("commit_project_generation", {
           p_project_id: requestedProjectId,
           p_summary: `Automated repair ${repairAttempts}: ${repair.patch.summary}`,
@@ -142,35 +143,21 @@ export async function POST(request: Request) {
         const versionRow = Array.isArray(version) ? version[0] : version;
         if (!versionRow?.id) throw new Error("Repair version returned no id");
         currentVersionId = versionRow.id;
-
-        await updateBuildRun(supabase, buildRunId, {
-          version_id: currentVersionId,
-          repair_attempts: repairAttempts,
-        });
+        await updateBuildRun(supabase, buildRunId, { version_id: currentVersionId, repair_attempts: repairAttempts });
         await writeSourceFiles(sandbox, changedFiles);
 
         if (repairRun.data?.id) {
-          await supabase
-            .from("ai_runs")
-            .update({
-              status: "succeeded",
-              input_tokens: repair.inputTokens,
-              output_tokens: repair.outputTokens,
-            })
-            .eq("id", repairRun.data.id);
+          await supabase.from("ai_runs").update({ status: "succeeded", input_tokens: repair.inputTokens, output_tokens: repair.outputTokens }).eq("id", repairRun.data.id);
         }
       } catch (repairError) {
         const message = repairError instanceof Error ? repairError.message : "Repair failed";
-        if (repairRun.data?.id) {
-          await supabase.from("ai_runs").update({ status: "failed", error_message: message }).eq("id", repairRun.data.id);
-        }
+        if (repairRun.data?.id) await supabase.from("ai_runs").update({ status: "failed", error_message: message }).eq("id", repairRun.data.id);
         throw repairError;
       }
     }
 
     await supabase.from("versions").update({ status: "tested" }).eq("id", currentVersionId);
     await updateBuildRun(supabase, buildRunId, { status: "starting", version_id: currentVersionId });
-
     const preview = await startPreview(sandbox);
     await updateBuildRun(supabase, buildRunId, {
       status: "ready",
@@ -187,22 +174,17 @@ export async function POST(request: Request) {
       versionId: currentVersionId,
       previewUrl: preview.previewUrl,
       repairAttempts,
+      backendConnected: Object.keys(sandboxEnv).length > 0,
       installLog,
       buildLog,
       previewLog: preview.previewLog,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Sandbox build failed";
-    if (buildRunId) {
-      await updateBuildRun(supabase, buildRunId, { status: "failed", error_message: clipLog(message, 30_000) });
-    }
+    if (buildRunId) await updateBuildRun(supabase, buildRunId, { status: "failed", error_message: clipLog(message, 30_000) });
     if (projectId) await supabase.from("projects").update({ status: "failed" }).eq("id", projectId);
     if (sandbox) {
-      try {
-        await sandbox.stop();
-      } catch {
-        // The timeout is a second cleanup boundary if stopping fails.
-      }
+      try { await sandbox.stop(); } catch { /* timeout is the second cleanup boundary */ }
     }
     if (error instanceof z.ZodError) return NextResponse.json({ error: "Invalid build request" }, { status: 400 });
     console.error(error);
@@ -210,15 +192,8 @@ export async function POST(request: Request) {
   }
 }
 
-async function loadVersionFiles(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  versionId: string,
-): Promise<SourceFile[]> {
-  const { data, error } = await supabase
-    .from("generated_files")
-    .select("path,content,content_hash")
-    .eq("version_id", versionId)
-    .order("path", { ascending: true });
+async function loadVersionFiles(supabase: Awaited<ReturnType<typeof createClient>>, versionId: string): Promise<SourceFile[]> {
+  const { data, error } = await supabase.from("generated_files").select("path,content,content_hash").eq("version_id", versionId).order("path", { ascending: true });
   if (error) throw new Error(error.message);
   if (!data?.length) throw new Error("Generated version has no source files");
   return data.map((file) => ({ path: safeSourcePath(file.path), content: file.content, content_hash: file.content_hash }));
@@ -239,11 +214,7 @@ function appendAttemptLog(existing: string, attempt: number, command: string, lo
   return clipLog(`${existing}\n\n===== ATTEMPT ${attempt}: ${command} =====\n${log}`.trim());
 }
 
-async function updateBuildRun(
-  supabase: Awaited<ReturnType<typeof createClient>>,
-  id: string,
-  patch: Record<string, unknown>,
-) {
+async function updateBuildRun(supabase: Awaited<ReturnType<typeof createClient>>, id: string, patch: Record<string, unknown>) {
   const { error } = await supabase.from("build_runs").update(patch).eq("id", id);
   if (error) console.warn("Build run status update failed:", error.message);
 }
