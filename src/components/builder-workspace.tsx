@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppBlueprint } from "@/lib/ai/schemas";
+import { GithubControls } from "@/components/github-controls";
 
 type ChatMessage = { role: "user" | "assistant"; text: string };
 type BuildStage = "idle" | "planning" | "generating" | "provisioning" | "configuring" | "building" | "ready" | "failed";
@@ -114,7 +115,7 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
           <span className="badge">{stage.toUpperCase()}</span>
           {sandboxBuild?.qa?.passed ? <span className="badge">BROWSER QA ✓</span> : null}
           {sandboxBuild?.visualQa?.passed ? <span className="badge">VISUAL {sandboxBuild.visualQa.score ?? "QA"} ✓</span> : null}
-          <button className="secondary-btn" type="button">GitHub</button>
+          <GithubControls projectId={projectId} versionId={sandboxBuild?.versionId ?? null} />
           {sandboxBuild?.previewUrl ? <a className="secondary-btn" href={sandboxBuild.previewUrl} target="_blank" rel="noreferrer">Open Preview</a> : null}
           <button className="primary-btn" type="button" disabled={stage !== "ready"}>Publish</button>
         </div>
