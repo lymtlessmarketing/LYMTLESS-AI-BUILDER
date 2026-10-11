@@ -336,6 +336,8 @@ async function cleanupBranch(
     await deleteDatabaseBranch(branchRef);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Branch cleanup failed";
+    // Supabase may remove an ephemeral branch automatically after a successful merge.
+    if (/Management API 404:/.test(message)) return;
     await supabase.from("backend_schema_runs").update({ status: "cleanup_failed", error_message: clip(message) }).eq("id", schemaRunId);
   }
 }
