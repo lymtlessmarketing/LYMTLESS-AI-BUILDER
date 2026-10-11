@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { repairBrowserQaFailure, repairBuildFailure } from "@/lib/ai/repair";
+import {
+  repairBrowserQaFailure,
+  repairBuildFailure,
+  repairVisualQaFailure,
+} from "@/lib/ai/repair";
+import { reviewVisuals } from "@/lib/ai/visual-review";
 import {
   buildApplication,
   clipLog,
@@ -26,6 +31,14 @@ export const maxDuration = 300;
 const requestSchema = z.object({ projectId: z.string().uuid() });
 const MAX_REPAIRS = 2;
 const MAX_SOURCE_BYTES = 2_000_000;
+
+type VisualFinding = {
+  severity: "error" | "warning";
+  viewport: "desktop" | "tablet" | "mobile" | "all";
+  category: string;
+  issue: string;
+  recommendation: string;
+};
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -79,6 +92,7 @@ export async function POST(request: Request) {
         user_id: user.id,
         status: "creating",
         qa_status: "pending",
+        visual_status: "pending",
       })
       .select("id")
       .single();
@@ -93,8 +107,11 @@ export async function POST(request: Request) {
     let installLog = "";
     let buildLog = "";
     let qaLog = "";
+    let visualLog = "";
     let previewLog = "";
     let qaFindings: BrowserQaFinding[] = [];
+    let visualFindings: VisualFinding[] = [];
+    let visualScore: number | null = null;
     let previewUrl = "";
 
     while (true) {
@@ -154,6 +171,7 @@ export async function POST(request: Request) {
       await updateBuildRun(supabase, buildRunId, {
         status: "testing",
         qa_status: "running",
+        visual_status: "pending",
         preview_url: previewUrl,
         preview_log: previewLog,
         qa_log: qaLog,
@@ -169,23 +187,93 @@ export async function POST(request: Request) {
         qa_findings: qaFindings,
       });
 
-      if (qa.result.passed) break;
+      if (!qa.result.passed) {
+        await stopPreview(sandbox);
+        const failure = `BROWSER QA FAILED\n${qa.log}`;
+        ({ files, currentVersionId, repairAttempts } = await repairFailure({
+          supabase,
+          sandbox,
+          buildRunId,
+          projectId: requestedProjectId,
+          userId: user.id,
+          blueprint: project.blueprint,
+          files,
+          currentVersionId,
+          repairAttempts,
+          failure,
+          kind: "qa",
+        }));
+        continue;
+      }
 
-      await stopPreview(sandbox);
-      const failure = `BROWSER QA FAILED\n${qa.log}`;
-      ({ files, currentVersionId, repairAttempts } = await repairFailure({
-        supabase,
-        sandbox,
-        buildRunId,
-        projectId: requestedProjectId,
-        userId: user.id,
-        blueprint: project.blueprint,
-        files,
-        currentVersionId,
-        repairAttempts,
-        failure,
-        kind: "qa",
-      }));
+      await updateBuildRun(supabase, buildRunId, { visual_status: "running" });
+      const visualRun = await supabase
+        .from("ai_runs")
+        .insert({
+          project_id: requestedProjectId,
+          user_id: user.id,
+          run_type: "review",
+          model: process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || "gpt-6.1-sol",
+          status: "running",
+        })
+        .select("id")
+        .single();
+
+      try {
+        const visual = await reviewVisuals({ sandbox, blueprint: project.blueprint });
+        visualFindings = visual.review.findings;
+        visualScore = visual.review.score;
+        visualLog = appendAttemptLog(
+          visualLog,
+          repairAttempts + 1,
+          "AI visual QA",
+          JSON.stringify(visual.review, null, 2),
+        );
+
+        await updateBuildRun(supabase, buildRunId, {
+          visual_status: visual.review.passed ? "passed" : "failed",
+          visual_log: visualLog,
+          visual_findings: visualFindings,
+        });
+
+        if (visualRun.data?.id) {
+          await supabase
+            .from("ai_runs")
+            .update({
+              status: "succeeded",
+              input_tokens: visual.inputTokens,
+              output_tokens: visual.outputTokens,
+            })
+            .eq("id", visualRun.data.id);
+        }
+
+        if (visual.review.passed) break;
+
+        await stopPreview(sandbox);
+        const failure = `VISUAL QA FAILED\nScore: ${visual.review.score}/100\n${JSON.stringify(visual.review.findings, null, 2)}`;
+        ({ files, currentVersionId, repairAttempts } = await repairFailure({
+          supabase,
+          sandbox,
+          buildRunId,
+          projectId: requestedProjectId,
+          userId: user.id,
+          blueprint: project.blueprint,
+          files,
+          currentVersionId,
+          repairAttempts,
+          failure,
+          kind: "visual",
+        }));
+      } catch (visualError) {
+        const message = visualError instanceof Error ? visualError.message : "Visual QA failed";
+        if (visualRun.data?.id) {
+          await supabase
+            .from("ai_runs")
+            .update({ status: "failed", error_message: clipLog(message, 10_000) })
+            .eq("id", visualRun.data.id);
+        }
+        throw visualError;
+      }
     }
 
     await lockSandboxNetwork(sandbox);
@@ -196,6 +284,9 @@ export async function POST(request: Request) {
       qa_status: "passed",
       qa_log: qaLog,
       qa_findings: qaFindings,
+      visual_status: "passed",
+      visual_log: visualLog,
+      visual_findings: visualFindings,
       preview_url: previewUrl,
       preview_log: previewLog,
       error_message: null,
@@ -211,9 +302,11 @@ export async function POST(request: Request) {
       repairAttempts,
       backendConnected: Object.keys(sandboxEnv).length > 0,
       qa: { passed: true, findings: qaFindings },
+      visualQa: { passed: true, score: visualScore, findings: visualFindings },
       installLog,
       buildLog,
       qaLog,
+      visualLog,
       previewLog,
     });
   } catch (error) {
@@ -222,6 +315,7 @@ export async function POST(request: Request) {
       await updateBuildRun(supabase, buildRunId, {
         status: "failed",
         qa_status: "failed",
+        visual_status: "failed",
         error_message: clipLog(message, 30_000),
       });
     }
@@ -248,13 +342,14 @@ type RepairFailureOptions = {
   currentVersionId: string;
   repairAttempts: number;
   failure: string;
-  kind: "build" | "qa";
+  kind: "build" | "qa" | "visual";
 };
 
 async function repairFailure(options: RepairFailureOptions) {
   await options.supabase.from("versions").update({ status: "failed" }).eq("id", options.currentVersionId);
   if (options.repairAttempts >= MAX_REPAIRS) {
-    throw new Error(`Application did not pass ${options.kind === "qa" ? "browser QA" : "the build"} after ${MAX_REPAIRS} automated repair attempts. ${clipLog(options.failure, 20_000)}`);
+    const gate = options.kind === "qa" ? "browser QA" : options.kind === "visual" ? "visual QA" : "the build";
+    throw new Error(`Application did not pass ${gate} after ${MAX_REPAIRS} automated repair attempts. ${clipLog(options.failure, 20_000)}`);
   }
 
   const nextAttempt = options.repairAttempts + 1;
@@ -279,7 +374,9 @@ async function repairFailure(options: RepairFailureOptions) {
   try {
     const repair = options.kind === "qa"
       ? await repairBrowserQaFailure({ files: options.files, qaLog: options.failure, blueprint: options.blueprint })
-      : await repairBuildFailure({ files: options.files, buildLog: options.failure, blueprint: options.blueprint });
+      : options.kind === "visual"
+        ? await repairVisualQaFailure({ files: options.files, visualLog: options.failure, blueprint: options.blueprint })
+        : await repairBuildFailure({ files: options.files, buildLog: options.failure, blueprint: options.blueprint });
 
     const changedFiles = repair.patch.changes.map((change) => {
       const safePath = safeSourcePath(change.path);
@@ -297,7 +394,7 @@ async function repairFailure(options: RepairFailureOptions) {
 
     const { data: version, error: versionError } = await options.supabase.rpc("commit_project_generation", {
       p_project_id: options.projectId,
-      p_summary: `Automated ${options.kind === "qa" ? "browser QA" : "build"} repair ${nextAttempt}: ${repair.patch.summary}`,
+      p_summary: `Automated ${options.kind === "qa" ? "browser QA" : options.kind === "visual" ? "visual QA" : "build"} repair ${nextAttempt}: ${repair.patch.summary}`,
       p_files: files.map((file) => ({ path: file.path, content: file.content, content_hash: file.content_hash })),
     });
     if (versionError || !version) throw new Error(versionError?.message || "Could not persist repaired version");
@@ -309,7 +406,10 @@ async function repairFailure(options: RepairFailureOptions) {
     await updateBuildRun(options.supabase, options.buildRunId, {
       version_id: currentVersionId,
       repair_attempts: nextAttempt,
-      qa_status: options.kind === "qa" ? "pending" : undefined,
+      qa_status: "pending",
+      visual_status: "pending",
+      qa_findings: [],
+      visual_findings: [],
     });
     await writeSourceFiles(options.sandbox, changedFiles);
 
