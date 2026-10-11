@@ -11,6 +11,7 @@ Independent AI-powered no-code/full-code app builder foundation.
 - Numbered generated-code versions stored atomically in Supabase
 - Dedicated Supabase project provisioning for generated apps that require database/auth/storage
 - Guarded generated SQL/RLS setup with migration hashes and Supabase security-advisor checks
+- Safe Supabase preview-branch schema evolution for later generated versions, with advisor + schema-diff gates before production merge
 - Vercel Sandbox execution for isolated npm install/build/preview
 - Playwright browser QA inside the same sandbox at desktop, tablet, and mobile widths
 - Browser QA traverses up to eight static blueprint routes and catches blank/collapsed pages, horizontal overflow, broken images, uncaught JS errors, console errors, and critical request failures
@@ -41,7 +42,7 @@ Independent AI-powered no-code/full-code app builder foundation.
 3. Configure Vercel Sandbox authentication using either:
    - `VERCEL_OIDC_TOKEN` (recommended; `vercel link` + `vercel env pull` locally, automatic when deployed on Vercel), or
    - `VERCEL_TOKEN` + `VERCEL_TEAM_ID` + `VERCEL_PROJECT_ID`.
-4. To provision isolated Supabase backends for generated apps, configure a server-only scoped Management API token plus `SUPABASE_PLATFORM_ORG_SLUG`. Keep the token out of generated apps and browser code.
+4. To provision isolated Supabase backends and evolve their schemas, configure a server-only scoped Management API token plus `SUPABASE_PLATFORM_ORG_SLUG`. Keep the token out of generated apps and browser code. The scoped token needs the project/database/advisor permissions already used by provisioning plus `branching_development_create`, `branching_development_read`, `branching_development_write`, `branching_development_delete`, and `action_runs_read` for schema evolution.
 5. Register a GitHub App for generated-app source control and configure the server-only `GITHUB_*` variables described in `.env.example`.
 6. Install dependencies with `npm install`.
 7. Run `npm run dev`.
@@ -73,7 +74,7 @@ Builder-originated commits use a `[LYMTLESS]` prefix and are ignored by the inbo
 
 ## Build pipeline
 
-`Prompt → architecture → generated source → numbered version → dedicated app backend (when required) → guarded SQL/RLS → Supabase security advisor → Vercel Sandbox → npm install → production build → build repair if needed → Vite preview → Playwright route QA at desktop/tablet/mobile → runtime repair if needed → AI screenshot review → visual repair if needed → all gates rerun → egress deny-all → live preview ready → GitHub auto-sync when connected`
+`Prompt → architecture → generated source → numbered version → dedicated app backend (when required) → guarded SQL/RLS → Supabase schema gate → Vercel Sandbox → npm install → production build → build repair if needed → Vite preview → Playwright route QA at desktop/tablet/mobile → runtime repair if needed → AI screenshot review → visual repair if needed → all gates rerun → egress deny-all → live preview ready → GitHub auto-sync when connected`
 
 ## Browser QA gate
 
@@ -100,6 +101,18 @@ The visual agent returns a typed 0–100 informational quality score plus struct
 
 If blocking visual defects exist, the visual repair agent produces the smallest source patch it can, saves a new numbered application version, and restarts the complete build → browser QA → visual QA sequence. The total automatic repair budget across all gates is capped at two passes.
 
+## Supabase schema evolution
+
+The first generated database schema is applied directly only because the generated app backend is new and empty. Later generated versions never mutate production first.
+
+For a later version with unseen SQL migrations, LYMTLESS runs:
+
+`validate SQL → create/reuse data-less ephemeral preview branch → wait for branch health → apply migrations to branch → run branch security advisor → calculate public-schema diff → merge branch → poll Supabase deployment action → wait for production health → run production security advisor → mark migrations applied → update schema version → remove preview branch`
+
+A no-op schema diff is accepted without a production merge. Each schema run stores the branch identifiers, diff payload, security findings, deployment workflow ID, validation log, and final status.
+
+Because the default preview branch does not contain production data, automatic evolution is intentionally **additive-first**. Destructive or production-data-dependent operations—including drops, renames, type rewrites, new data-validating constraints, unique indexes, NOT NULL changes, and INSERT/UPDATE/DELETE/TRUNCATE data migrations—are blocked from automatic merge and reserved for a future explicit human-review workflow.
+
 ## Security boundaries
 
 - Generated code never runs in the LYMTLESS control-plane process.
@@ -107,6 +120,7 @@ If blocking visual defects exist, the visual repair agent produces the smallest 
 - Generated apps receive only their own Supabase URL and publishable key; Management API tokens, DB passwords, and service/secret keys are never injected into the sandbox.
 - Generated database passwords are transient and never persisted by LYMTLESS.
 - Generated SQL is blocked from privileged roles, `SECURITY DEFINER`, managed-schema DDL/DML, `GRANT ALL`, replication/event triggers, server-file access, and unapproved extensions.
+- Automatic live schema evolution is additionally restricted to non-destructive, non-data-dependent migrations.
 - New generated public tables must enable Row Level Security.
 - Generated paths reject traversal, `.git`, `.github`, credential files, build output, and common binary assets during GitHub source import.
 - Source bundles are capped at 2 MB; GitHub import also caps per-file and total source volume.
@@ -116,13 +130,9 @@ If blocking visual defects exist, the visual repair agent produces the smallest 
 - Sandbox network access is disabled before the user-facing preview is declared ready.
 - Supabase RLS protects all user-facing control-plane records per project owner; privileged connection records have no browser Data API grants.
 
-## Current schema-evolution rule
-
-The first schema is applied only to a newly provisioned empty app backend. If a later generated version introduces unseen SQL migrations, the builder blocks the live change until the DEV-branch migration workflow is enabled. This prevents AI-generated edits from mutating a live database directly.
-
 ## Next milestones
 
-1. Supabase DEV-branch schema evolution and safe merge-to-production.
-2. Select & Edit component targeting.
-3. Production deployment and custom domains.
-4. Integration marketplace, billing/credits, team collaboration, and broader model routing.
+1. Select & Edit component targeting.
+2. Production deployment and custom domains.
+3. Integration marketplace, billing/credits, team collaboration, and broader model routing.
+4. Human-reviewed destructive/data-dependent database migration approvals.
