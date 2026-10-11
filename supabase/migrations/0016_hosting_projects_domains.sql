@@ -28,6 +28,7 @@ create table if not exists public.project_domains (
 create index if not exists hosting_projects_user_id_idx on public.hosting_projects(user_id);
 create index if not exists project_domains_project_status_idx on public.project_domains(project_id, status);
 create index if not exists project_domains_user_id_idx on public.project_domains(user_id);
+create index if not exists project_domains_hosting_project_id_idx on public.project_domains(hosting_project_id);
 
 alter table public.hosting_projects enable row level security;
 alter table public.project_domains enable row level security;
