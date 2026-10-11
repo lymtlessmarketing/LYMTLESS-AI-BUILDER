@@ -18,13 +18,22 @@ type SandboxBuildResult = {
   previewLog: string;
 };
 
+type BackendConfigurationResult = {
+  configured: boolean;
+  appliedMigrations: number;
+  securityFindings: number;
+  strategy?: "no-schema-change" | "dev-branch";
+  mode?: "initial" | "evolution";
+  cleanupWarning?: string | null;
+};
+
 export function BuilderWorkspace({ projectId }: { projectId: string }) {
   const [prompt, setPrompt] = useState("");
   const [blueprint, setBlueprint] = useState<AppBlueprint | null>(null);
   const [generation, setGeneration] = useState<GenerationResult | null>(null);
   const [sandboxBuild, setSandboxBuild] = useState<SandboxBuildResult | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: "assistant", text: "Describe what you want to build. I’ll plan it, generate the code and backend, build it in an isolated sandbox, repair build failures automatically, and open a live preview." },
+    { role: "assistant", text: "Describe what you want to build. I’ll plan it, generate the code and backend, validate schema changes safely, build it in an isolated sandbox, repair build failures automatically, and open a live preview." },
   ]);
   const [stage, setStage] = useState<BuildStage>("idle");
   const [busy, setBusy] = useState(false);
@@ -65,8 +74,12 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
         await provisionBackend(projectId);
 
         setStage("configuring");
-        const configured = await postJson("/api/backends/supabase/configure", { projectId }, "Backend schema configuration failed");
-        setMessages((m) => [...m, { role: "assistant", text: `Backend ready. Applied ${configured.appliedMigrations} new database migration${configured.appliedMigrations === 1 ? "" : "s"}; security advisor is clean.` }]);
+        setMessages((m) => [...m, { role: "assistant", text: "Validating database changes on a data-free DEV branch before production merge…" }]);
+        const configured = await configureBackend(projectId);
+        setMessages((m) => [...m, {
+          role: "assistant",
+          text: backendConfigurationMessage(configured),
+        }]);
       }
 
       setStage("building");
@@ -144,7 +157,7 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
             {stage === "planning" && <div className="message ai">Designing architecture, data model, roles, and integrations…</div>}
             {stage === "generating" && <div className="message ai">Writing the complete application code bundle…</div>}
             {stage === "provisioning" && <div className="message ai">Creating the app’s isolated database/auth/storage project…</div>}
-            {stage === "configuring" && <div className="message ai">Applying guarded SQL/RLS and running backend security checks…</div>}
+            {stage === "configuring" && <div className="message ai">Creating a data-free DEV database branch, applying guarded SQL, checking security, and merging safe schema changes…</div>}
             {stage === "building" && <div className="message ai">Installing, compiling, testing the build, and repairing failures if necessary…</div>}
           </div>
           <div className="composer">
@@ -173,7 +186,7 @@ async function provisionBackend(projectId: string) {
     const response = await fetch("/api/backends/supabase/provision", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId }) });
     const data = await response.json();
     if (response.status === 202) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await delay(1500);
       continue;
     }
     if (!response.ok) {
@@ -185,11 +198,39 @@ async function provisionBackend(projectId: string) {
   throw new Error("Backend provisioning is still in progress; try the build again shortly");
 }
 
+async function configureBackend(projectId: string): Promise<BackendConfigurationResult> {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const response = await fetch("/api/backends/supabase/configure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId }),
+    });
+    const data = await response.json();
+    if (response.status === 202) {
+      await delay(1500);
+      continue;
+    }
+    if (!response.ok) {
+      throw new Error(data.error || "Backend schema configuration failed");
+    }
+    return data as BackendConfigurationResult;
+  }
+  throw new Error("Backend schema validation is still in progress; try the build again shortly");
+}
+
+function backendConfigurationMessage(configured: BackendConfigurationResult) {
+  if (configured.strategy === "no-schema-change") return "Backend ready. No new schema changes were required; security state remains unchanged.";
+  const migrationText = `${configured.appliedMigrations} database migration${configured.appliedMigrations === 1 ? "" : "s"}`;
+  const modeText = configured.mode === "evolution" ? " through an isolated DEV branch" : " on the initial isolated backend";
+  const cleanupText = configured.cleanupWarning ? " The schema was merged successfully, but DEV-branch cleanup needs retrying." : "";
+  return `Backend ready. Validated and merged ${migrationText}${modeText}; security advisor is clean.${cleanupText}`;
+}
+
 function stageLabel(stage: BuildStage) {
   if (stage === "planning") return "Architecture agent";
   if (stage === "generating") return "Code-generation agent";
   if (stage === "provisioning") return "Backend provisioning";
-  if (stage === "configuring") return "Backend security + schema";
+  if (stage === "configuring") return "DEV schema validation";
   if (stage === "building") return "Sandbox + repair agents";
   if (stage === "ready") return "Live preview ready";
   if (stage === "failed") return "Build failed";
@@ -198,9 +239,13 @@ function stageLabel(stage: BuildStage) {
 
 function previewStatus(stage: BuildStage) {
   if (stage === "provisioning") return "Provisioning isolated app backend…";
-  if (stage === "configuring") return "Configuring database and RLS…";
+  if (stage === "configuring") return "Validating schema on a data-free DEV branch…";
   if (stage === "building") return "Building isolated live preview…";
   if (stage === "ready") return "Live sandbox preview";
   if (stage === "generating") return "Generating application files…";
   return "Application Preview";
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
