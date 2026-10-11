@@ -183,7 +183,7 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
     } finally {
       setBusy(false);
     }
-  }, [busy, disableSelection, editInstruction, projectId, sandboxBuild?.versionId, selectedTarget]);
+  }, [busy, disableSelection, editInstruction, projectId, sandboxBuild, selectedTarget]);
 
   const toggleSelectionMode = useCallback(() => {
     if (!sandboxBuild?.previewUrl || !selectionReady || busy) return;
