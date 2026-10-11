@@ -12,6 +12,10 @@ const BLOCKED_PATTERNS: Array<[RegExp, string]> = [
   [/\bgrant\b[\s\S]*\bto\s+(postgres|supabase_admin|service_role)\b/i, "grants to privileged platform roles are not allowed"],
   [/\b(create|alter|drop)\s+(table|view|function|schema)\s+(?:"?(?:auth|storage|vault|extensions|supabase_[a-z0-9_]*)"?)(?:\.|\b)/i, "Supabase-managed schemas cannot be modified by generated migrations"],
   [/\b(insert\s+into|update|delete\s+from|truncate(?:\s+table)?)\s+(?:"?(?:auth|storage|vault|extensions|supabase_[a-z0-9_]*)"?)\./i, "data in Supabase-managed schemas cannot be modified by generated migrations"],
+  [/\b(begin|commit|rollback|savepoint|release\s+savepoint|start\s+transaction)\b\s*;?/i, "transaction control belongs to the LYMTLESS migration runner"],
+  [/\bconcurrently\b/i, "CONCURRENTLY cannot run inside the LYMTLESS atomic migration transaction"],
+  [/\bdo\s+\$[^$]*\$/i, "anonymous DO blocks require manual review"],
+  [/\bexecute\s+(?:format\s*\(|quote_ident\s*\(|quote_literal\s*\(|['\"])/i, "dynamic SQL execution requires manual review"],
 ];
 
 const EVOLUTION_BLOCKED_PATTERNS: Array<[RegExp, string]> = [
@@ -31,18 +35,20 @@ export function validateGeneratedMigration(sql: string, mode: "initial" | "evolu
   if (!sql.trim()) throw new Error("Migration is empty");
   if (sql.length > 500_000) throw new Error("Migration exceeds the 500 KB SQL limit");
 
+  const scanSql = stripSqlComments(sql);
+
   for (const [pattern, reason] of BLOCKED_PATTERNS) {
-    if (pattern.test(sql)) throw new Error(`Unsafe generated migration: ${reason}`);
+    if (pattern.test(scanSql)) throw new Error(`Unsafe generated migration: ${reason}`);
   }
 
   if (mode === "evolution") {
     for (const [pattern, reason] of EVOLUTION_BLOCKED_PATTERNS) {
-      if (pattern.test(sql)) throw new Error(`Unsafe automatic schema evolution: ${reason}`);
+      if (pattern.test(scanSql)) throw new Error(`Unsafe automatic schema evolution: ${reason}`);
     }
-    validateAddColumnSafety(sql);
+    validateAddColumnSafety(scanSql);
   }
 
-  const extensionMatches = sql.matchAll(/\bcreate\s+extension(?:\s+if\s+not\s+exists)?\s+"?([a-zA-Z0-9_-]+)"?/gi);
+  const extensionMatches = scanSql.matchAll(/\bcreate\s+extension(?:\s+if\s+not\s+exists)?\s+"?([a-zA-Z0-9_-]+)"?/gi);
   for (const match of extensionMatches) {
     const name = match[1]?.toLowerCase();
     if (name && !ALLOWED_EXTENSIONS.has(name)) {
@@ -51,7 +57,7 @@ export function validateGeneratedMigration(sql: string, mode: "initial" | "evolu
   }
 
   const publicTables = Array.from(
-    sql.matchAll(/\bcreate\s+table(?:\s+if\s+not\s+exists)?\s+(?:public\.)?"?([a-zA-Z_][a-zA-Z0-9_]*)"?/gi),
+    scanSql.matchAll(/\bcreate\s+table(?:\s+if\s+not\s+exists)?\s+(?:public\.)?"?([a-zA-Z_][a-zA-Z0-9_]*)"?/gi),
   ).map((match) => match[1]);
 
   for (const table of publicTables) {
@@ -60,7 +66,7 @@ export function validateGeneratedMigration(sql: string, mode: "initial" | "evolu
       `\\balter\\s+table(?:\\s+if\\s+exists)?\\s+(?:public\\.)?"?${escaped}"?\\s+enable\\s+row\\s+level\\s+security\\b`,
       "i",
     );
-    if (!rls.test(sql)) {
+    if (!rls.test(scanSql)) {
       throw new Error(`Unsafe generated migration: table ${table} is created without enabling Row Level Security`);
     }
   }
@@ -74,6 +80,12 @@ function validateAddColumnSafety(sql: string) {
       throw new Error("Unsafe automatic schema evolution: adding a NOT NULL column without a DEFAULT may fail on existing rows");
     }
   }
+}
+
+function stripSqlComments(sql: string) {
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--[^\r\n]*/g, " ");
 }
 
 function escapeRegExp(value: string) {
