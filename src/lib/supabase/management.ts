@@ -127,7 +127,14 @@ export async function mergeDatabaseBranch(branchRef: string) {
   );
 }
 
-export async function deleteDatabaseBranch(branchRef: string) {
+export async function scheduleDatabaseBranchDeletion(branchRef: string) {
+  return managementRequest<{ message?: string }>(
+    `/v1/branches/${encodeURIComponent(branchRef)}?force=false`,
+    { method: "DELETE" },
+  );
+}
+
+export async function forceDeleteDatabaseBranch(branchRef: string) {
   return managementRequest<{ message?: string }>(
     `/v1/branches/${encodeURIComponent(branchRef)}?force=true`,
     { method: "DELETE" },
