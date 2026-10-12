@@ -1,7 +1,14 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { LoginForm } from "@/components/login-form";
+import { createClient } from "@/lib/supabase/server";
 
-export default function LoginPage() {
+export default async function LoginPage() {
+  const supabase = await createClient();
+  const { data } = await supabase.auth.getUser();
+
+  if (data.user) redirect("/workspace");
+
   return (
     <main className="site-page-shell">
       <header className="site-page-nav">
