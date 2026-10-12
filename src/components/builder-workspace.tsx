@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AppBlueprint } from "@/lib/ai/schemas";
 
 type ChatMessage = { role: "user" | "assistant"; text: string };
-type BuildStage = "idle" | "planning" | "generating" | "previewing" | "ready" | "failed";
+type BuildStage = "idle" | "planning" | "generating" | "previewing" | "repairing" | "ready" | "failed";
 type GenerationResult = {
   version: { id: string; number: number; summary: string };
   files: string[];
@@ -17,7 +17,7 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
   const [generation, setGeneration] = useState<GenerationResult | null>(null);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: "assistant", text: "Describe what you want to build. I’ll plan, generate, compile, and launch a live preview." },
+    { role: "assistant", text: "Describe what you want to build. I’ll plan, generate, compile, repair if needed, and launch a live preview." },
   ]);
   const [stage, setStage] = useState<BuildStage>("idle");
   const [busy, setBusy] = useState(false);
@@ -29,21 +29,43 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
   );
 
   const startPreview = useCallback(async () => {
-    setStage("previewing");
     setPreview(null);
-    const previewRes = await fetch("/api/sandbox/build", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectId }),
-    });
-    const previewData = await previewRes.json();
-    if (!previewRes.ok) {
-      const details = previewData.logs ? `\n${previewData.logs}` : "";
-      throw new Error(`${previewData.error || "Sandbox preview failed"}${details}`);
+    let repairAttempts = 0;
+
+    while (repairAttempts <= 2) {
+      setStage(repairAttempts === 0 ? "previewing" : "repairing");
+      const previewRes = await fetch("/api/sandbox/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId }),
+      });
+      const previewData = await previewRes.json();
+
+      if (previewRes.ok) {
+        setPreview(previewData);
+        setStage("ready");
+        setMessages((m) => [...m, { role: "assistant", text: `Build passed${repairAttempts ? ` after ${repairAttempts} repair attempt${repairAttempts === 1 ? "" : "s"}` : ""}. The live application preview is running in an isolated sandbox.` }]);
+        return;
+      }
+
+      const logs = typeof previewData.logs === "string" ? previewData.logs : "";
+      if (previewRes.status !== 422 || !logs || repairAttempts >= 2) {
+        throw new Error(`${previewData.error || "Sandbox preview failed"}${logs ? `\n${logs}` : ""}`);
+      }
+
+      repairAttempts += 1;
+      setStage("repairing");
+      setMessages((m) => [...m, { role: "assistant", text: `Sandbox build failed. Auto-repair attempt ${repairAttempts} of 2 is analyzing the compiler logs…` }]);
+
+      const repairRes = await fetch("/api/ai/repair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, logs }),
+      });
+      const repairData = await repairRes.json();
+      if (!repairRes.ok) throw new Error(repairData.error || "Automatic repair failed");
+      setMessages((m) => [...m, { role: "assistant", text: `Repair version ${repairData.version.number} created: ${repairData.summary}` }]);
     }
-    setPreview(previewData);
-    setStage("ready");
-    setMessages((m) => [...m, { role: "assistant", text: "Build passed. The live application preview is running in an isolated sandbox." }]);
   }, [projectId]);
 
   const runPipeline = useCallback(async (content: string) => {
@@ -126,7 +148,7 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
 
         <section className="preview-wrap">
           <div className="preview-toolbar">
-            <span className="status">{preview ? "Live Sandbox Preview" : stage === "previewing" ? "Installing dependencies and compiling…" : "Application Preview"}</span>
+            <span className="status">{preview ? "Live Sandbox Preview" : stage === "previewing" ? "Installing dependencies and compiling…" : stage === "repairing" ? "Repairing build…" : "Application Preview"}</span>
             <span className="badge">{generation ? `VERSION ${generation.version.number}` : "Desktop"}</span>
           </div>
           <div className="preview-canvas">
@@ -170,6 +192,7 @@ export function BuilderWorkspace({ projectId }: { projectId: string }) {
             {stage === "planning" && <div className="message ai">Designing architecture, data model, roles, and integrations…</div>}
             {stage === "generating" && <div className="message ai">Writing the complete application code bundle…</div>}
             {stage === "previewing" && <div className="message ai">Running npm install, production build, health check, and isolated preview server…</div>}
+            {stage === "repairing" && <div className="message ai">Reading actual sandbox errors, patching affected files, and creating a new version…</div>}
           </div>
           <div className="composer">
             <textarea
@@ -205,6 +228,7 @@ function stageLabel(stage: BuildStage) {
   if (stage === "planning") return "Architecture agent";
   if (stage === "generating") return "Code-generation agent";
   if (stage === "previewing") return "Sandbox build";
+  if (stage === "repairing") return "Repair agent";
   if (stage === "ready") return "Live preview ready";
   if (stage === "failed") return "Build failed";
   return "Ready for prompt";
