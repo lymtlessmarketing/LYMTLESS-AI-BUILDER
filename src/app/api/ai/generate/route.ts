@@ -9,11 +9,12 @@ import { CODEGEN_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 const requestSchema = z.object({ projectId: z.string().uuid() });
 const forbiddenSecretFile = /(^|\/)(\.env|\.env\.local|\.env\.production|credentials\.json|service-account.*\.json)$/i;
 const forbiddenRepositoryPath = /^(\.git|\.github)(\/|$)/i;
-const maxBundleBytes = 2_000_000;
+const maxBundleBytes = 3_000_000;
 
 function validateGeneratedPath(input: string) {
   const normalized = path.posix.normalize(input.replaceAll("\\", "/"));
@@ -23,6 +24,25 @@ function validateGeneratedPath(input: string) {
   if (forbiddenSecretFile.test(normalized)) throw new Error(`Generated secret file is not allowed: ${normalized}`);
   if (forbiddenRepositoryPath.test(normalized)) throw new Error(`Generated repository-control file is not allowed: ${normalized}`);
   return normalized;
+}
+
+function validateProjectScaffold(files: Array<{ path: string; content: string }>) {
+  const byPath = new Map(files.map((file) => [file.path.toLowerCase(), file.content]));
+  const packageJson = byPath.get("package.json");
+  if (!packageJson) throw new Error("Generated application is missing package.json");
+  if (!byPath.has("index.html")) throw new Error("Generated Vite application is missing index.html");
+  if (![...byPath.keys()].some((filePath) => filePath.startsWith("src/"))) {
+    throw new Error("Generated application is missing source files under src/");
+  }
+
+  try {
+    const parsed = JSON.parse(packageJson) as { scripts?: Record<string, unknown> };
+    if (typeof parsed.scripts?.build !== "string") throw new Error("package.json is missing a build script");
+    if (typeof parsed.scripts?.dev !== "string") throw new Error("package.json is missing a dev script");
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error("Generated package.json is not valid JSON");
+    throw error;
+  }
 }
 
 export async function POST(request: Request) {
@@ -35,7 +55,7 @@ export async function POST(request: Request) {
     projectId = body.projectId;
     const { data: authData } = await supabase.auth.getUser();
     const user = authData.user;
-    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    if (!user) return NextResponse.json({ error: "Unauthorized", code: "UNAUTHORIZED" }, { status: 401 });
 
     const { data: project, error: projectError } = await supabase
       .from("projects")
@@ -43,9 +63,9 @@ export async function POST(request: Request) {
       .eq("id", body.projectId)
       .single();
 
-    if (projectError || !project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    if (projectError || !project) return NextResponse.json({ error: "Project not found", code: "PROJECT_NOT_FOUND" }, { status: 404 });
     if (!project.blueprint || Object.keys(project.blueprint).length === 0) {
-      return NextResponse.json({ error: "Create an application plan before generating code" }, { status: 409 });
+      return NextResponse.json({ error: "Create an application plan before generating code", code: "BLUEPRINT_REQUIRED" }, { status: 409 });
     }
 
     const model = getCodeModel();
@@ -72,7 +92,7 @@ export async function POST(request: Request) {
     });
 
     const generated = response.output_parsed;
-    if (!generated) throw new Error("Model returned no parsed generated application");
+    if (!generated) throw new Error("The code-generation model returned no valid application bundle.");
 
     const seen = new Set<string>();
     let bundleBytes = 0;
@@ -81,13 +101,15 @@ export async function POST(request: Request) {
       if (seen.has(safePath)) throw new Error(`Duplicate generated path: ${safePath}`);
       seen.add(safePath);
       bundleBytes += Buffer.byteLength(file.content, "utf8");
-      if (bundleBytes > maxBundleBytes) throw new Error("Generated application exceeds the 2 MB source bundle limit");
+      if (bundleBytes > maxBundleBytes) throw new Error("Generated application exceeds the 3 MB source bundle limit");
       return {
         path: safePath,
         content: file.content,
         content_hash: createHash("sha256").update(file.content, "utf8").digest("hex"),
       };
     });
+
+    validateProjectScaffold(files);
 
     const { data: version, error: commitError } = await supabase.rpc("commit_project_generation", {
       p_project_id: body.projectId,
@@ -124,11 +146,14 @@ export async function POST(request: Request) {
       files: files.map((file) => file.path),
     });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: "Invalid generation request", code: "INVALID_GENERATION_REQUEST", details: error.issues }, { status: 400 });
+    }
+
     const message = error instanceof Error ? error.message : "Unable to generate application";
     if (runId) await supabase.from("ai_runs").update({ status: "failed", error_message: message }).eq("id", runId);
     if (projectId) await supabase.from("projects").update({ status: "failed" }).eq("id", projectId);
-    if (error instanceof z.ZodError) return NextResponse.json({ error: "Invalid generation request", details: error.issues }, { status: 400 });
-    console.error(error);
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("Generation failed:", error);
+    return NextResponse.json({ error: message, code: "GENERATION_FAILED" }, { status: 500 });
   }
 }
