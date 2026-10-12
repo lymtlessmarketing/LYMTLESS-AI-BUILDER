@@ -7,11 +7,40 @@ import { appBlueprintSchema } from "@/lib/ai/schemas";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
+export const maxDuration = 300;
+
+export const MAX_BUILD_PROMPT_CHARS = 120_000;
 
 const requestSchema = z.object({
   projectId: z.string().uuid(),
-  prompt: z.string().trim().min(10).max(20_000),
+  prompt: z.string().trim().min(10).max(MAX_BUILD_PROMPT_CHARS),
 });
+
+function requestError(error: z.ZodError) {
+  const promptIssue = error.issues.find((issue) => issue.path[0] === "prompt");
+  if (promptIssue?.code === "too_big") {
+    return NextResponse.json(
+      {
+        error: `Prompt is too long. Maximum ${MAX_BUILD_PROMPT_CHARS.toLocaleString()} characters.`,
+        code: "PROMPT_TOO_LONG",
+        maxCharacters: MAX_BUILD_PROMPT_CHARS,
+      },
+      { status: 413 },
+    );
+  }
+
+  if (promptIssue?.code === "too_small") {
+    return NextResponse.json(
+      { error: "Describe the application in at least 10 characters.", code: "PROMPT_TOO_SHORT" },
+      { status: 400 },
+    );
+  }
+
+  return NextResponse.json(
+    { error: "The build request is invalid.", code: "INVALID_BUILD_REQUEST", details: error.issues },
+    { status: 400 },
+  );
+}
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -24,7 +53,7 @@ export async function POST(request: Request) {
 
     const { data: authData } = await supabase.auth.getUser();
     const user = authData.user;
-    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    if (!user) return NextResponse.json({ error: "Unauthorized", code: "UNAUTHORIZED" }, { status: 401 });
 
     const { data: project, error: projectError } = await supabase
       .from("projects")
@@ -33,7 +62,7 @@ export async function POST(request: Request) {
       .single();
 
     if (projectError || !project) {
-      return NextResponse.json({ error: "Project not found" }, { status: 404 });
+      return NextResponse.json({ error: "Project not found", code: "PROJECT_NOT_FOUND" }, { status: 404 });
     }
 
     const model = getPlanningModel();
@@ -73,10 +102,10 @@ export async function POST(request: Request) {
     });
 
     const blueprint = response.output_parsed;
-    if (!blueprint) throw new Error("AI did not return a valid application blueprint");
+    if (!blueprint) throw new Error("The architecture model returned no valid application blueprint.");
 
     const { error: projectUpdateError } = await supabase.from("projects").update({
-      name: blueprint.name,
+      name: blueprint.name.slice(0, 120),
       description: blueprint.summary,
       blueprint,
       status: "planned",
@@ -103,15 +132,14 @@ export async function POST(request: Request) {
       if (result.error) console.warn("Planning audit write failed:", result.error.message);
     });
 
-    return NextResponse.json({ blueprint });
+    return NextResponse.json({ blueprint, promptCharacters: body.prompt.length });
   } catch (error) {
+    if (error instanceof z.ZodError) return requestError(error);
+
     const message = error instanceof Error ? error.message : "Unable to create application plan";
     if (runId) await supabase.from("ai_runs").update({ status: "failed", error_message: message }).eq("id", runId);
     if (projectId) await supabase.from("projects").update({ status: "failed" }).eq("id", projectId);
-    if (error instanceof z.ZodError) {
-      return NextResponse.json({ error: "Invalid request", details: error.issues }, { status: 400 });
-    }
-    console.error(error);
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("Planning failed:", error);
+    return NextResponse.json({ error: message, code: "PLANNING_FAILED" }, { status: 500 });
   }
 }
