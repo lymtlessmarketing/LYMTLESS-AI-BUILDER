@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { createAIClient, getCodeModel } from "@/lib/ai/client";
 import { repairPatchSchema } from "@/lib/ai/schemas";
 import { REPAIR_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { createClient } from "@/lib/supabase/server";
@@ -55,9 +55,7 @@ export async function POST(request: Request) {
     if (fileError) throw new Error(fileError.message);
     if (!currentFiles?.length) throw new Error("Current version has no files");
 
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return NextResponse.json({ error: "OPENAI_API_KEY is not configured" }, { status: 503 });
-    const model = process.env.OPENAI_CODE_MODEL || process.env.OPENAI_MODEL || "gpt-6.1-sol";
+    const model = getCodeModel();
 
     const { data: run, error: runError } = await supabase
       .from("ai_runs")
@@ -68,7 +66,7 @@ export async function POST(request: Request) {
     runId = run?.id ?? null;
 
     const source = currentFiles.map((file) => `--- ${file.path} ---\n${file.content}`).join("\n\n");
-    const client = new OpenAI({ apiKey });
+    const client = createAIClient();
     const response = await client.responses.parse({
       model,
       input: [
