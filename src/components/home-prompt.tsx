@@ -47,17 +47,14 @@ export function HomePrompt() {
   }
 
   return (
-    <div className="lux-prompt-shell">
-      <div className="lux-prompt-chrome">
-        <div className="lux-engine-id">
-          <span className="lux-live-dot" />
-          <strong>LYMTLESS ENGINE</strong>
-        </div>
-        <div className="lux-engine-status">READY / FULL STACK</div>
+    <div className="cr-prompt-shell">
+      <div className="cr-prompt-head">
+        <span>LYMTLESS ENGINE / FULL STACK</span>
+        <span className="cr-ready"><i /> READY</span>
       </div>
 
-      <div className="lux-prompt-body">
-        <span className="lux-prompt-overline">START WITH AN IDEA</span>
+      <div className="cr-prompt-main">
+        <span className="cr-overline">DESCRIBE WHAT YOU WANT TO BUILD</span>
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
@@ -66,30 +63,20 @@ export function HomePrompt() {
         />
       </div>
 
-      <div className="lux-prompt-divider" />
+      <div className="cr-prompt-presets">
+        {examples.map(([number, label]) => (
+          <button type="button" key={label} onClick={() => useExample(label)}>
+            <span>{number}</span>{label}
+          </button>
+        ))}
+      </div>
 
-      <div className="lux-prompt-lower">
-        <div className="lux-prompt-left">
-          <span className={`lux-runtime ${error ? "error" : ""}`}>
-            {error || "ARCHITECTURE · UI · DATA · AUTH · LOGIC · DEPLOY"}
-          </span>
-          <div className="lux-example-list" aria-label="Example app types">
-            {examples.map(([number, label]) => (
-              <button type="button" key={label} onClick={() => useExample(label)}>
-                <span>{number}</span>
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <button
-          className="lux-build-button"
-          disabled={busy || prompt.trim().length < 10}
-          onClick={create}
-        >
-          <span className="lux-build-label">{busy ? "CREATING" : "BUILD THE APP"}</span>
-          <span className="lux-build-icon">↗</span>
+      <div className="cr-prompt-foot">
+        <span className={`cr-runtime ${error ? "error" : ""}`}>
+          {error || "ARCHITECTURE · DATABASE · AUTH · UI · LOGIC · BUILD · DEPLOY"}
+        </span>
+        <button className="cr-build-button" disabled={busy || prompt.trim().length < 10} onClick={create}>
+          {busy ? "CREATING…" : "BUILD THE APP"}<span>↗</span>
         </button>
       </div>
     </div>
