@@ -3,8 +3,23 @@
 import { FormEvent, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
-const CONFIRM_REDIRECT = "https://lymtless-ai-builder-git.vercel.app/login?confirmed=1";
 const WORKSPACE_URL = "/workspace";
+const PENDING_PROMPT_KEY = "pending-build-prompt";
+
+function confirmationRedirect() {
+  if (typeof window === "undefined") return "https://lymtless-ai-builder-git.vercel.app/login?confirmed=1";
+  return `${window.location.origin}/login?confirmed=1`;
+}
+
+async function readPayload(response: Response) {
+  const text = await response.text();
+  if (!text) return {} as { error?: string; project?: { id: string } };
+  try {
+    return JSON.parse(text) as { error?: string; project?: { id: string } };
+  } catch {
+    return { error: `Request failed with HTTP ${response.status}.` };
+  }
+}
 
 export function LoginForm() {
   const [email, setEmail] = useState("");
@@ -15,59 +30,91 @@ export function LoginForm() {
   const [busy, setBusy] = useState(false);
   const [resending, setResending] = useState(false);
 
-  function enterWorkspace() {
-    window.location.assign(WORKSPACE_URL);
+  async function continueAfterAuth() {
+    const pendingPrompt = sessionStorage.getItem(PENDING_PROMPT_KEY);
+    if (!pendingPrompt) {
+      window.location.assign(WORKSPACE_URL);
+      return;
+    }
+
+    const projectRes = await fetch("/api/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Untitled App" }),
+    });
+    const projectData = await readPayload(projectRes);
+    if (!projectRes.ok || !projectData.project?.id) {
+      throw new Error(projectData.error || "Signed in, but the pending project could not be created.");
+    }
+
+    sessionStorage.removeItem(PENDING_PROMPT_KEY);
+    sessionStorage.setItem(`initial-prompt:${projectData.project.id}`, pendingPrompt);
+    window.location.assign(`/builder/${projectData.project.id}`);
   }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
+    if (busy) return;
+
     setBusy(true);
     setError("");
     setNotice("");
-    const supabase = createClient();
 
-    if (mode === "login") {
-      const result = await supabase.auth.signInWithPassword({ email, password });
+    try {
+      const supabase = createClient();
+
+      if (mode === "login") {
+        const result = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        if (result.error) throw result.error;
+        if (!result.data.session) throw new Error("Sign-in succeeded but no session was created. Please try again.");
+        await continueAfterAuth();
+        return;
+      }
+
+      const result = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+        options: { emailRedirectTo: confirmationRedirect() },
+      });
+      if (result.error) throw result.error;
+
+      if (result.data.session) {
+        await continueAfterAuth();
+        return;
+      }
+
+      setNotice("Confirmation email sent. Open the newest email from LYMTLESS and click Confirm Email.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Authentication failed. Please try again.");
+    } finally {
       setBusy(false);
-      if (result.error) return setError(result.error.message);
-      if (!result.data.session) return setError("Sign-in succeeded but no session was created. Please try again.");
-      enterWorkspace();
-      return;
     }
-
-    const result = await supabase.auth.signUp({
-      email,
-      password,
-      options: { emailRedirectTo: CONFIRM_REDIRECT },
-    });
-    setBusy(false);
-    if (result.error) return setError(result.error.message);
-
-    if (result.data.session) {
-      enterWorkspace();
-      return;
-    }
-
-    setNotice("Confirmation email sent. Open the newest email from LYMTLESS and click Confirm Email.");
   }
 
   async function resendConfirmation() {
-    if (!email) {
+    if (!email.trim()) {
       setError("Enter your email address first.");
       return;
     }
+    if (resending) return;
+
     setResending(true);
     setError("");
     setNotice("");
-    const supabase = createClient();
-    const { error: resendError } = await supabase.auth.resend({
-      type: "signup",
-      email,
-      options: { emailRedirectTo: CONFIRM_REDIRECT },
-    });
-    setResending(false);
-    if (resendError) return setError(resendError.message);
-    setNotice("A fresh confirmation email was sent. Use the newest link only.");
+    try {
+      const supabase = createClient();
+      const { error: resendError } = await supabase.auth.resend({
+        type: "signup",
+        email: email.trim(),
+        options: { emailRedirectTo: confirmationRedirect() },
+      });
+      if (resendError) throw resendError;
+      setNotice("A fresh confirmation email was sent. Use the newest link only.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not resend the confirmation email.");
+    } finally {
+      setResending(false);
+    }
   }
 
   const showResend = mode === "login" && error.toLowerCase().includes("email not confirmed");
