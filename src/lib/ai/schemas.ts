@@ -38,5 +38,15 @@ export const generatedAppSchema = z.object({
   })).min(5).max(80),
 });
 
+export const repairPatchSchema = z.object({
+  summary: z.string().min(1),
+  upserts: z.array(z.object({
+    path: z.string().min(1).max(240),
+    content: z.string().max(120_000),
+  })).max(30),
+  deletes: z.array(z.string().min(1).max(240)).max(20),
+});
+
 export type AppBlueprint = z.infer<typeof appBlueprintSchema>;
 export type GeneratedApp = z.infer<typeof generatedAppSchema>;
+export type RepairPatch = z.infer<typeof repairPatchSchema>;
