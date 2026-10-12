@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { createAIClient, getCodeModel } from "@/lib/ai/client";
 import { generatedAppSchema } from "@/lib/ai/schemas";
 import { CODEGEN_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { createClient } from "@/lib/supabase/server";
@@ -48,9 +48,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Create an application plan before generating code" }, { status: 409 });
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return NextResponse.json({ error: "OPENAI_API_KEY is not configured" }, { status: 503 });
-    const model = process.env.OPENAI_CODE_MODEL || process.env.OPENAI_MODEL || "gpt-6.1-sol";
+    const model = getCodeModel();
 
     const { error: statusError } = await supabase.from("projects").update({ status: "generating" }).eq("id", body.projectId);
     if (statusError) throw new Error(statusError.message);
@@ -63,7 +61,7 @@ export async function POST(request: Request) {
     if (runError) throw new Error(runError.message);
     runId = run?.id ?? null;
 
-    const client = new OpenAI({ apiKey });
+    const client = createAIClient();
     const response = await client.responses.parse({
       model,
       input: [
