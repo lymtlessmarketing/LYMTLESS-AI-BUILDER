@@ -3,12 +3,25 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
+const MAX_PROMPT_CHARS = 120_000;
+const PENDING_PROMPT_KEY = "pending-build-prompt";
+
 const examples = [
   ["01", "CRM"],
   ["02", "CLIENT PORTAL"],
   ["03", "OPERATIONS OS"],
   ["04", "MARKETPLACE"],
 ];
+
+async function readPayload(response: Response) {
+  const text = await response.text();
+  if (!text) return {} as { error?: string; project?: { id: string } };
+  try {
+    return JSON.parse(text) as { error?: string; project?: { id: string } };
+  } catch {
+    return { error: `Request failed with HTTP ${response.status}.` };
+  }
+}
 
 export function HomePrompt() {
   const [prompt, setPrompt] = useState("Build a multi-user CRM with leads, pipeline stages, tasks, role-based permissions, and a dashboard.");
@@ -17,6 +30,10 @@ export function HomePrompt() {
   const router = useRouter();
 
   async function create() {
+    const clean = prompt.trim();
+    if (clean.length < 10) return setError("Describe the application in at least 10 characters.");
+    if (clean.length > MAX_PROMPT_CHARS) return setError(`Prompt is too long. Maximum ${MAX_PROMPT_CHARS.toLocaleString()} characters.`);
+
     setBusy(true);
     setError("");
     try {
@@ -25,9 +42,16 @@ export function HomePrompt() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: "Untitled App" }),
       });
-      const projectData = await projectRes.json();
-      if (!projectRes.ok) throw new Error(projectData.error || "Could not create project");
-      sessionStorage.setItem(`initial-prompt:${projectData.project.id}`, prompt);
+      const projectData = await readPayload(projectRes);
+
+      if (projectRes.status === 401) {
+        sessionStorage.setItem(PENDING_PROMPT_KEY, clean);
+        router.push("/login");
+        return;
+      }
+
+      if (!projectRes.ok || !projectData.project?.id) throw new Error(projectData.error || "Could not create project");
+      sessionStorage.setItem(`initial-prompt:${projectData.project.id}`, clean);
       router.push(`/builder/${projectData.project.id}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create project");
@@ -57,6 +81,7 @@ export function HomePrompt() {
         <span className="cr-overline">DESCRIBE WHAT YOU WANT TO BUILD</span>
         <textarea
           value={prompt}
+          maxLength={MAX_PROMPT_CHARS}
           onChange={(e) => setPrompt(e.target.value)}
           aria-label="Describe your app"
           placeholder="Describe the product you want to build..."
@@ -73,7 +98,7 @@ export function HomePrompt() {
 
       <div className="cr-prompt-foot">
         <span className={`cr-runtime ${error ? "error" : ""}`}>
-          {error || "ARCHITECTURE · DATABASE · AUTH · UI · LOGIC · BUILD · DEPLOY"}
+          {error || `ARCHITECTURE · DATABASE · AUTH · UI · LOGIC · BUILD · DEPLOY · ${prompt.length.toLocaleString()}/${MAX_PROMPT_CHARS.toLocaleString()}`}
         </span>
         <button className="cr-build-button" disabled={busy || prompt.trim().length < 10} onClick={create}>
           {busy ? "CREATING…" : "BUILD THE APP"}<span>↗</span>
