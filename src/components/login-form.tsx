@@ -1,10 +1,10 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
 const CONFIRM_REDIRECT = "https://lymtless-ai-builder-git.vercel.app/login?confirmed=1";
+const WORKSPACE_URL = "/workspace";
 
 export function LoginForm() {
   const [email, setEmail] = useState("");
@@ -14,7 +14,10 @@ export function LoginForm() {
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [resending, setResending] = useState(false);
-  const router = useRouter();
+
+  function enterWorkspace() {
+    window.location.assign(WORKSPACE_URL);
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -27,8 +30,8 @@ export function LoginForm() {
       const result = await supabase.auth.signInWithPassword({ email, password });
       setBusy(false);
       if (result.error) return setError(result.error.message);
-      router.push("/");
-      router.refresh();
+      if (!result.data.session) return setError("Sign-in succeeded but no session was created. Please try again.");
+      enterWorkspace();
       return;
     }
 
@@ -41,8 +44,7 @@ export function LoginForm() {
     if (result.error) return setError(result.error.message);
 
     if (result.data.session) {
-      router.push("/");
-      router.refresh();
+      enterWorkspace();
       return;
     }
 
