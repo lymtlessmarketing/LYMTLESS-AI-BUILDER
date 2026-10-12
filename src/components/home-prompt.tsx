@@ -4,10 +4,10 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 
 const examples = [
-  "CRM",
-  "Client portal",
-  "Booking app",
-  "Internal dashboard",
+  ["01", "CRM"],
+  ["02", "CLIENT PORTAL"],
+  ["03", "OPERATIONS OS"],
+  ["04", "MARKETPLACE"],
 ];
 
 export function HomePrompt() {
@@ -36,49 +36,60 @@ export function HomePrompt() {
     }
   }
 
+  function useExample(example: string) {
+    const prompts: Record<string, string> = {
+      CRM: "Build a premium multi-user CRM with lead management, pipeline stages, tasks, permissions, reporting, and a polished executive dashboard.",
+      "CLIENT PORTAL": "Build a high-end client portal with authentication, projects, files, invoices, messaging, approvals, and a refined responsive interface.",
+      "OPERATIONS OS": "Build an internal operations system with role-based access, workflows, requests, tasks, dashboards, notifications, and audit history.",
+      MARKETPLACE: "Build a two-sided marketplace with buyer and seller accounts, listings, search, payments, messaging, reviews, and admin controls.",
+    };
+    setPrompt(prompts[example] || prompt);
+  }
+
   return (
-    <div className="prompt-surface">
-      <div className="prompt-topline">
-        <div>
-          <span className="prompt-label">What do you want to build?</span>
-          <span className="prompt-hint">Describe the product, workflow, or business tool.</span>
+    <div className="lux-prompt-shell">
+      <div className="lux-prompt-chrome">
+        <div className="lux-engine-id">
+          <span className="lux-live-dot" />
+          <strong>LYMTLESS ENGINE</strong>
         </div>
-        <span className="prompt-mode">FULL STACK</span>
+        <div className="lux-engine-status">READY / FULL STACK</div>
       </div>
 
-      <textarea
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
-        aria-label="Describe your app"
-        placeholder="Describe your app..."
-      />
+      <div className="lux-prompt-body">
+        <span className="lux-prompt-overline">START WITH AN IDEA</span>
+        <textarea
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          aria-label="Describe your app"
+          placeholder="Describe the product you want to build..."
+        />
+      </div>
 
-      <div className="prompt-footer">
-        <div className="prompt-meta">
-          <span className={`prompt-status ${error ? "error" : ""}`}>
-            {error || "Database · Auth · Backend · UI · Deploy"}
+      <div className="lux-prompt-divider" />
+
+      <div className="lux-prompt-lower">
+        <div className="lux-prompt-left">
+          <span className={`lux-runtime ${error ? "error" : ""}`}>
+            {error || "ARCHITECTURE · UI · DATA · AUTH · LOGIC · DEPLOY"}
           </span>
-          <div className="example-chips" aria-label="Example app types">
-            {examples.map((example) => (
-              <button
-                type="button"
-                className="example-chip"
-                key={example}
-                onClick={() => setPrompt(`Build a polished ${example.toLowerCase()} with authentication, database, responsive UI, and production-ready workflows.`)}
-              >
-                {example}
+          <div className="lux-example-list" aria-label="Example app types">
+            {examples.map(([number, label]) => (
+              <button type="button" key={label} onClick={() => useExample(label)}>
+                <span>{number}</span>
+                {label}
               </button>
             ))}
           </div>
         </div>
 
         <button
-          className="build-button"
+          className="lux-build-button"
           disabled={busy || prompt.trim().length < 10}
           onClick={create}
         >
-          <span>{busy ? "Creating…" : "Build app"}</span>
-          <span className="build-arrow" aria-hidden="true">↗</span>
+          <span className="lux-build-label">{busy ? "CREATING" : "BUILD THE APP"}</span>
+          <span className="lux-build-icon">↗</span>
         </button>
       </div>
     </div>
