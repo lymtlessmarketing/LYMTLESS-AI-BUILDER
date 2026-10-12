@@ -1,6 +1,9 @@
 import Link from "next/link";
 import { HomePrompt } from "@/components/home-prompt";
 import { LandingMotion } from "@/components/landing-motion";
+import { createClient } from "@/lib/supabase/server";
+
+export const dynamic = "force-dynamic";
 
 const pillars = [
   { overline: "PILLAR I", title: "The Architect", text: "Turns a raw idea into product structure, data models, roles, workflows, and a build plan." },
@@ -23,7 +26,12 @@ const paths = [
   { eyebrow: "PATH III", title: "The System", sub: "A production workflow you control.", points: ["GitHub source", "Supabase backend", "Vercel deployment", "Real application ownership"], cta: "BUILD THE SYSTEM", featured: true },
 ];
 
-export default function Home() {
+export default async function Home() {
+  const supabase = await createClient();
+  const { data: authData } = await supabase.auth.getUser();
+  const signedIn = Boolean(authData.user);
+  const accountHref = signedIn ? "/workspace" : "/login";
+
   return (
     <main className="cr-shell">
       <LandingMotion />
@@ -35,7 +43,7 @@ export default function Home() {
           <a href="#standards">STANDARD</a>
           <a href="#paths">ACCESS</a>
         </nav>
-        <Link href="/login" className="cr-nav-cta">SIGN IN <span>↗</span></Link>
+        <Link href={accountHref} className="cr-nav-cta">{signedIn ? "WORKSPACE" : "SIGN IN"} <span>↗</span></Link>
       </header>
 
       <section className="cr-hero">
@@ -53,7 +61,7 @@ export default function Home() {
         <div className="cr-hero-actions">
           <a href="#builder" className="cr-button cr-button-solid">BUILD AN APP</a>
           <a href="#pillars" className="cr-button cr-button-outline">SEE THE SYSTEM</a>
-          <Link href="/login" className="cr-button cr-button-ghost">OPEN WORKSPACE</Link>
+          <Link href={accountHref} className="cr-button cr-button-ghost">{signedIn ? "OPEN WORKSPACE" : "SIGN IN"}</Link>
         </div>
       </section>
 
@@ -198,7 +206,7 @@ export default function Home() {
           <a href="#pillars">SYSTEM</a>
           <a href="#standards">STANDARD</a>
           <a href="#paths">ACCESS</a>
-          <Link href="/login">SIGN IN</Link>
+          <Link href={accountHref}>{signedIn ? "WORKSPACE" : "SIGN IN"}</Link>
         </nav>
         <small>© 2026 LYMTLESS</small>
       </footer>
