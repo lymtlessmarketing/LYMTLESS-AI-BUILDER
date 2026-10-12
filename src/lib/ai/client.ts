@@ -2,12 +2,12 @@ import OpenAI from "openai";
 
 const GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh/v1";
 
-export function createAIClient() {
-  const apiKey = process.env.VERCEL_OIDC_TOKEN || process.env.AI_GATEWAY_API_KEY;
+export function createAIClient(requestOidcToken?: string | null) {
+  const apiKey = requestOidcToken || process.env.VERCEL_OIDC_TOKEN || process.env.AI_GATEWAY_API_KEY;
 
   if (!apiKey) {
     throw new Error(
-      "Vercel AI Gateway authentication is unavailable. Deploy on Vercel with OIDC enabled or set AI_GATEWAY_API_KEY for local development.",
+      "Vercel AI Gateway authentication is unavailable. Enable Vercel OIDC for this project or set AI_GATEWAY_API_KEY for local development.",
     );
   }
 
