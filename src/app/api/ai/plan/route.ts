@@ -89,7 +89,7 @@ export async function POST(request: Request) {
     if (runError) console.warn("AI run audit creation failed:", runError.message);
     runId = run?.id ?? null;
 
-    const client = createAIClient();
+    const client = createAIClient(request.headers.get("x-vercel-oidc-token"));
     const response = await client.responses.parse({
       model,
       input: [
