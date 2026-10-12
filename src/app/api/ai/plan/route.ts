@@ -1,7 +1,7 @@
-import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { createAIClient, getPlanningModel } from "@/lib/ai/client";
 import { ARCHITECT_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { appBlueprintSchema } from "@/lib/ai/schemas";
 import { createClient } from "@/lib/supabase/server";
@@ -36,10 +36,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return NextResponse.json({ error: "OPENAI_API_KEY is not configured" }, { status: 503 });
-
-    const model = process.env.OPENAI_MODEL || "gpt-6.1-sol";
+    const model = getPlanningModel();
 
     const { error: userMessageError } = await supabase.from("messages").insert({
       project_id: body.projectId,
@@ -63,7 +60,7 @@ export async function POST(request: Request) {
     if (runError) console.warn("AI run audit creation failed:", runError.message);
     runId = run?.id ?? null;
 
-    const client = new OpenAI({ apiKey });
+    const client = createAIClient();
     const response = await client.responses.parse({
       model,
       input: [
