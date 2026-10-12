@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { HomePrompt } from "@/components/home-prompt";
+import { LandingMotion } from "@/components/landing-motion";
 
 const pillars = [
   { overline: "PILLAR I", title: "The Architect", text: "Turns a raw idea into product structure, data models, roles, workflows, and a build plan." },
@@ -25,6 +26,7 @@ const paths = [
 export default function Home() {
   return (
     <main className="cr-shell">
+      <LandingMotion />
       <header className="cr-nav">
         <Link href="/" className="cr-brand">LYMTLESS <em>AI BUILDER</em></Link>
         <nav className="cr-nav-links" aria-label="Primary navigation">
