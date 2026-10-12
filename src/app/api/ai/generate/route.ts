@@ -81,7 +81,7 @@ export async function POST(request: Request) {
     if (runError) throw new Error(runError.message);
     runId = run?.id ?? null;
 
-    const client = createAIClient();
+    const client = createAIClient(request.headers.get("x-vercel-oidc-token"));
     const response = await client.responses.parse({
       model,
       input: [
