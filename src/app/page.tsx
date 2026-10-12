@@ -1,31 +1,81 @@
 import Link from "next/link";
 import { HomePrompt } from "@/components/home-prompt";
 
+const capabilities = [
+  { number: "01", title: "Full-stack generation", text: "Frontend, backend, database, auth, storage, and functions." },
+  { number: "02", title: "Conversational editing", text: "Refine features, logic, and design without rebuilding from scratch." },
+  { number: "03", title: "Production workflow", text: "GitHub source control, isolated builds, testing, repair, and deployment." },
+];
+
 export default function Home() {
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand">LYMTLESS AI BUILDER</div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <span className="badge">MVP FOUNDATION</span>
-          <Link className="secondary-btn" href="/login">Sign in</Link>
+    <main className="public-shell">
+      <div className="public-grid" aria-hidden="true" />
+      <div className="public-glow public-glow-one" aria-hidden="true" />
+      <div className="public-glow public-glow-two" aria-hidden="true" />
+
+      <header className="public-nav">
+        <Link href="/" className="brand-lockup" aria-label="LYMTLESS AI BUILDER home">
+          <span className="brand-mark">L</span>
+          <span className="brand-copy">
+            <strong>LYMTLESS</strong>
+            <small>AI BUILDER</small>
+          </span>
+        </Link>
+
+        <div className="nav-actions">
+          <a className="nav-link" href="#capabilities">Capabilities</a>
+          <Link className="nav-signin" href="/login">Sign in</Link>
         </div>
       </header>
-      <div className="container">
-        <section className="hero">
-          <div>
-            <div className="eyebrow">DESCRIBE IT. BUILD IT. SHIP IT.</div>
-            <h1>Turn plain English into working software.</h1>
-            <p>Generate full-stack applications with UI, database architecture, authentication, permissions, storage, integrations, versioning, and deployment workflows from one conversational workspace.</p>
-            <div className="feature-grid">
-              <div className="card feature"><strong>Full-stack generation</strong><span>Frontend, data model, auth, storage, functions, and integrations.</span></div>
-              <div className="card feature"><strong>Conversational iteration</strong><span>Refine features and design without rebuilding the entire application.</span></div>
-              <div className="card feature"><strong>Own the code</strong><span>GitHub becomes the durable source of truth for generated projects.</span></div>
-            </div>
-          </div>
+
+      <section className="premium-hero">
+        <div className="hero-kicker">
+          <span className="kicker-dot" />
+          AI SOFTWARE CREATION PLATFORM
+        </div>
+
+        <h1>
+          Build software at the
+          <span className="headline-accent"> speed of thought.</span>
+        </h1>
+
+        <p className="hero-subtitle">
+          Describe what you want. LYMTLESS architects the product, writes the code,
+          connects the backend, tests it, and gets it ready to ship.
+        </p>
+
+        <div className="hero-command" id="builder">
           <HomePrompt />
-        </section>
-      </div>
+        </div>
+
+        <div className="platform-row" aria-label="Platform stack">
+          <span>REACT</span>
+          <i />
+          <span>SUPABASE</span>
+          <i />
+          <span>GITHUB</span>
+          <i />
+          <span>VERCEL</span>
+        </div>
+      </section>
+
+      <section className="capabilities-section" id="capabilities">
+        <div className="section-heading">
+          <span>ONE WORKSPACE</span>
+          <h2>From idea to working application.</h2>
+        </div>
+
+        <div className="capability-grid">
+          {capabilities.map((item) => (
+            <article className="capability-card" key={item.number}>
+              <div className="capability-number">{item.number}</div>
+              <h3>{item.title}</h3>
+              <p>{item.text}</p>
+            </article>
+          ))}
+        </div>
+      </section>
     </main>
   );
 }
