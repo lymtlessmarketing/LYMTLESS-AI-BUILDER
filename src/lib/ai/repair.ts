@@ -1,6 +1,9 @@
-import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import type { SourceFile } from "@/lib/sandbox/build";
+import {
+  resolveOpenAIModels,
+  runDirectOpenAIWithFallback,
+} from "@/lib/ai/openai-direct";
 import { repairPatchSchema } from "@/lib/ai/schemas";
 import {
   QA_REPAIR_SYSTEM_PROMPT,
@@ -77,37 +80,45 @@ export async function repairVisualQaFailure(options: {
 }
 
 async function runRepair(options: RepairOptions) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY is not configured for repair");
-
-  const model = process.env.OPENAI_REPAIR_MODEL || process.env.OPENAI_CODE_MODEL || process.env.OPENAI_MODEL || "gpt-6.1-sol";
-  const client = new OpenAI({ apiKey });
+  const models = resolveOpenAIModels({
+    primary: process.env.OPENAI_REPAIR_MODEL || process.env.OPENAI_CODE_MODEL || process.env.OPENAI_MODEL,
+    fallback: process.env.OPENAI_REPAIR_FALLBACK_MODEL || process.env.OPENAI_CODE_FALLBACK_MODEL || process.env.OPENAI_FALLBACK_MODEL,
+    defaultPrimary: "gpt-6.1-sol",
+    defaultFallback: "gpt-6-luna",
+  });
   const context = selectRepairContext(options.files, options.failureLog);
 
-  const response = await client.responses.parse({
-    model,
-    input: [
-      { role: "system", content: options.systemPrompt },
-      {
-        role: "user",
-        content: [
-          "APPLICATION BLUEPRINT:",
-          JSON.stringify(options.blueprint, null, 2),
-          `\n${options.failureLabel}:`,
-          options.failureLog.slice(-30_000),
-          "\nRELEVANT PROJECT FILES:",
-          context,
-        ].join("\n"),
-      },
-    ],
-    text: { format: zodTextFormat(repairPatchSchema, options.schemaName) },
+  const ai = await runDirectOpenAIWithFallback({
+    operation: "automated repair",
+    primaryModel: models.primary,
+    fallbackModel: models.fallback,
+    execute: (client, model) => client.responses.parse({
+      model,
+      input: [
+        { role: "system", content: options.systemPrompt },
+        {
+          role: "user",
+          content: [
+            "APPLICATION BLUEPRINT:",
+            JSON.stringify(options.blueprint, null, 2),
+            `\n${options.failureLabel}:`,
+            options.failureLog.slice(-30_000),
+            "\nRELEVANT PROJECT FILES:",
+            context,
+          ].join("\n"),
+        },
+      ],
+      text: { format: zodTextFormat(repairPatchSchema, options.schemaName) },
+    }),
   });
 
+  const response = ai.value;
   if (!response.output_parsed) throw new Error("Repair model returned no valid patch");
 
   return {
     patch: response.output_parsed,
-    model,
+    model: ai.model,
+    usedFallback: ai.usedFallback,
     inputTokens: response.usage?.input_tokens ?? null,
     outputTokens: response.usage?.output_tokens ?? null,
   };
