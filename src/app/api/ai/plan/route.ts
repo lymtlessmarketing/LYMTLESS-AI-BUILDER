@@ -1,7 +1,11 @@
-import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import {
+  isDirectOpenAIConfigured,
+  resolveOpenAIModels,
+  runDirectOpenAIWithFallback,
+} from "@/lib/ai/openai-direct";
 import { ARCHITECT_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { appBlueprintSchema } from "@/lib/ai/schemas";
 import { createClient } from "@/lib/supabase/server";
@@ -36,10 +40,19 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return NextResponse.json({ error: "OPENAI_API_KEY is not configured" }, { status: 503 });
+    if (!isDirectOpenAIConfigured()) {
+      return NextResponse.json(
+        { error: "OPENAI_DIRECT_API_KEY is not configured" },
+        { status: 503 },
+      );
+    }
 
-    const model = process.env.OPENAI_MODEL || "gpt-6.1-sol";
+    const models = resolveOpenAIModels({
+      primary: process.env.OPENAI_MODEL,
+      fallback: process.env.OPENAI_FALLBACK_MODEL,
+      defaultPrimary: "gpt-6-luna",
+      defaultFallback: "gpt-6.1-sol",
+    });
 
     const { error: userMessageError } = await supabase.from("messages").insert({
       project_id: body.projectId,
@@ -55,7 +68,7 @@ export async function POST(request: Request) {
         project_id: body.projectId,
         user_id: user.id,
         run_type: "plan",
-        model,
+        model: models.primary,
         status: "running",
       })
       .select("id")
@@ -63,18 +76,23 @@ export async function POST(request: Request) {
     if (runError) console.warn("AI run audit creation failed:", runError.message);
     runId = run?.id ?? null;
 
-    const client = new OpenAI({ apiKey });
-    const response = await client.responses.parse({
-      model,
-      input: [
-        { role: "system", content: ARCHITECT_SYSTEM_PROMPT },
-        { role: "user", content: body.prompt },
-      ],
-      text: {
-        format: zodTextFormat(appBlueprintSchema, "application_blueprint"),
-      },
+    const ai = await runDirectOpenAIWithFallback({
+      operation: "application planning",
+      primaryModel: models.primary,
+      fallbackModel: models.fallback,
+      execute: (client, model) => client.responses.parse({
+        model,
+        input: [
+          { role: "system", content: ARCHITECT_SYSTEM_PROMPT },
+          { role: "user", content: body.prompt },
+        ],
+        text: {
+          format: zodTextFormat(appBlueprintSchema, "application_blueprint"),
+        },
+      }),
     });
 
+    const response = ai.value;
     const blueprint = response.output_parsed;
     if (!blueprint) throw new Error("AI did not return a valid application blueprint");
 
@@ -92,11 +110,12 @@ export async function POST(request: Request) {
         user_id: user.id,
         role: "assistant",
         content: `Created architecture blueprint for ${blueprint.name}.`,
-        metadata: { blueprint },
+        metadata: { blueprint, model: ai.model, usedFallback: ai.usedFallback },
       }),
       runId
         ? supabase.from("ai_runs").update({
             status: "succeeded",
+            model: ai.model,
             input_tokens: response.usage?.input_tokens ?? null,
             output_tokens: response.usage?.output_tokens ?? null,
           }).eq("id", runId)
@@ -106,7 +125,7 @@ export async function POST(request: Request) {
       if (result.error) console.warn("Planning audit write failed:", result.error.message);
     });
 
-    return NextResponse.json({ blueprint });
+    return NextResponse.json({ blueprint, model: ai.model, usedFallback: ai.usedFallback });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to create application plan";
     if (runId) await supabase.from("ai_runs").update({ status: "failed", error_message: message }).eq("id", runId);
