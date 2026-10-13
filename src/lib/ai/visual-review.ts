@@ -1,6 +1,9 @@
-import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import type { Sandbox } from "@vercel/sandbox";
+import {
+  resolveOpenAIModels,
+  runDirectOpenAIWithFallback,
+} from "@/lib/ai/openai-direct";
 import { visualReviewSchema, type VisualReview } from "@/lib/ai/schemas";
 
 const MAX_IMAGE_BYTES = 19_000_000;
@@ -32,12 +35,13 @@ Set passed=false when any error-level finding exists. Give a 0-100 production-re
 export async function reviewVisuals(options: {
   sandbox: Sandbox;
   blueprint: unknown;
-}): Promise<{ review: VisualReview; model: string; inputTokens: number | null; outputTokens: number | null }> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY is not configured for visual review");
-
-  const model = process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || "gpt-6.1-sol";
-  const client = new OpenAI({ apiKey });
+}): Promise<{ review: VisualReview; model: string; usedFallback: boolean; inputTokens: number | null; outputTokens: number | null }> {
+  const models = resolveOpenAIModels({
+    primary: process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL,
+    fallback: process.env.OPENAI_VISION_FALLBACK_MODEL || process.env.OPENAI_FALLBACK_MODEL,
+    defaultPrimary: "gpt-6.1-sol",
+    defaultFallback: "gpt-6-luna",
+  });
   const content: Array<
     | { type: "input_text"; text: string }
     | { type: "input_image"; image_url: string; detail: "high" }
@@ -56,15 +60,21 @@ export async function reviewVisuals(options: {
     content.push({ type: "input_image", image_url: `data:image/png;base64,${buffer.toString("base64")}`, detail: "high" });
   }
 
-  const response = await client.responses.parse({
-    model,
-    input: [
-      { role: "system", content: VISUAL_REVIEW_PROMPT },
-      { role: "user", content },
-    ],
-    text: { format: zodTextFormat(visualReviewSchema, "visual_qa_review") },
+  const ai = await runDirectOpenAIWithFallback({
+    operation: "visual QA review",
+    primaryModel: models.primary,
+    fallbackModel: models.fallback,
+    execute: (client, model) => client.responses.parse({
+      model,
+      input: [
+        { role: "system", content: VISUAL_REVIEW_PROMPT },
+        { role: "user", content },
+      ],
+      text: { format: zodTextFormat(visualReviewSchema, "visual_qa_review") },
+    }),
   });
 
+  const response = ai.value;
   if (!response.output_parsed) throw new Error("Visual review model returned no valid structured result");
   const parsed = response.output_parsed;
   const hasBlockingFinding = parsed.findings.some((finding) => finding.severity === "error");
@@ -75,7 +85,8 @@ export async function reviewVisuals(options: {
 
   return {
     review,
-    model,
+    model: ai.model,
+    usedFallback: ai.usedFallback,
     inputTokens: response.usage?.input_tokens ?? null,
     outputTokens: response.usage?.output_tokens ?? null,
   };
