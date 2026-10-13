@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import {
+  isDirectOpenAIConfigured,
+  resolveOpenAIModels,
+  runDirectOpenAIWithFallback,
+} from "@/lib/ai/openai-direct";
 import { generatedAppSchema } from "@/lib/ai/schemas";
 import { CODEGEN_SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { createClient } from "@/lib/supabase/server";
@@ -48,31 +52,46 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Create an application plan before generating code" }, { status: 409 });
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return NextResponse.json({ error: "OPENAI_API_KEY is not configured" }, { status: 503 });
-    const model = process.env.OPENAI_CODE_MODEL || process.env.OPENAI_MODEL || "gpt-6.1-sol";
+    if (!isDirectOpenAIConfigured()) {
+      return NextResponse.json(
+        { error: "OPENAI_DIRECT_API_KEY is not configured" },
+        { status: 503 },
+      );
+    }
+
+    const models = resolveOpenAIModels({
+      primary: process.env.OPENAI_CODE_MODEL || process.env.OPENAI_MODEL,
+      fallback: process.env.OPENAI_CODE_FALLBACK_MODEL || process.env.OPENAI_FALLBACK_MODEL,
+      defaultPrimary: "gpt-6.1-sol",
+      defaultFallback: "gpt-6-luna",
+    });
 
     const { error: statusError } = await supabase.from("projects").update({ status: "generating" }).eq("id", body.projectId);
     if (statusError) throw new Error(statusError.message);
 
     const { data: run, error: runError } = await supabase
       .from("ai_runs")
-      .insert({ project_id: body.projectId, user_id: user.id, run_type: "generate", model, status: "running" })
+      .insert({ project_id: body.projectId, user_id: user.id, run_type: "generate", model: models.primary, status: "running" })
       .select("id")
       .single();
     if (runError) throw new Error(runError.message);
     runId = run?.id ?? null;
 
-    const client = new OpenAI({ apiKey });
-    const response = await client.responses.parse({
-      model,
-      input: [
-        { role: "system", content: CODEGEN_SYSTEM_PROMPT },
-        { role: "user", content: `APPLICATION BLUEPRINT:\n${JSON.stringify(project.blueprint, null, 2)}` },
-      ],
-      text: { format: zodTextFormat(generatedAppSchema, "generated_application") },
+    const ai = await runDirectOpenAIWithFallback({
+      operation: "application code generation",
+      primaryModel: models.primary,
+      fallbackModel: models.fallback,
+      execute: (client, model) => client.responses.parse({
+        model,
+        input: [
+          { role: "system", content: CODEGEN_SYSTEM_PROMPT },
+          { role: "user", content: `APPLICATION BLUEPRINT:\n${JSON.stringify(project.blueprint, null, 2)}` },
+        ],
+        text: { format: zodTextFormat(generatedAppSchema, "generated_application") },
+      }),
     });
 
+    const response = ai.value;
     const generated = response.output_parsed;
     if (!generated) throw new Error("Model returned no parsed generated application");
 
@@ -105,6 +124,7 @@ export async function POST(request: Request) {
       runId
         ? supabase.from("ai_runs").update({
             status: "succeeded",
+            model: ai.model,
             input_tokens: response.usage?.input_tokens ?? null,
             output_tokens: response.usage?.output_tokens ?? null,
           }).eq("id", runId)
@@ -114,7 +134,13 @@ export async function POST(request: Request) {
         user_id: user.id,
         role: "assistant",
         content: `Generated version ${versionRow.version_number} with ${files.length} files.`,
-        metadata: { versionId: versionRow.id, versionNumber: versionRow.version_number, fileCount: files.length },
+        metadata: {
+          versionId: versionRow.id,
+          versionNumber: versionRow.version_number,
+          fileCount: files.length,
+          model: ai.model,
+          usedFallback: ai.usedFallback,
+        },
       }),
     ]);
     auditResults.forEach((result) => {
@@ -124,6 +150,8 @@ export async function POST(request: Request) {
     return NextResponse.json({
       version: { id: versionRow.id, number: versionRow.version_number, summary: generated.summary },
       files: files.map((file) => file.path),
+      model: ai.model,
+      usedFallback: ai.usedFallback,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to generate application";
