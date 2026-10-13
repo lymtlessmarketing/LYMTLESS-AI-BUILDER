@@ -1,6 +1,9 @@
-import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import type { SourceFile } from "@/lib/sandbox/build";
+import {
+  resolveOpenAIModels,
+  runDirectOpenAIWithFallback,
+} from "@/lib/ai/openai-direct";
 import { repairPatchSchema } from "@/lib/ai/schemas";
 
 const MAX_CONTEXT_CHARS = 150_000;
@@ -59,39 +62,47 @@ export async function runTargetedEdit(options: {
   target: SelectionTarget;
   instruction: string;
 }) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY is not configured for targeted editing");
-
-  const model = process.env.OPENAI_EDIT_MODEL || process.env.OPENAI_CODE_MODEL || process.env.OPENAI_MODEL || "gpt-6.1-sol";
-  const client = new OpenAI({ apiKey });
+  const models = resolveOpenAIModels({
+    primary: process.env.OPENAI_EDIT_MODEL || process.env.OPENAI_CODE_MODEL || process.env.OPENAI_MODEL,
+    fallback: process.env.OPENAI_EDIT_FALLBACK_MODEL || process.env.OPENAI_CODE_FALLBACK_MODEL || process.env.OPENAI_FALLBACK_MODEL,
+    defaultPrimary: "gpt-6.1-sol",
+    defaultFallback: "gpt-6-luna",
+  });
   const context = selectTargetContext(options.files, options.target);
 
-  const response = await client.responses.parse({
-    model,
-    input: [
-      { role: "system", content: TARGETED_EDIT_SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: [
-          "USER EDIT INSTRUCTION:",
-          options.instruction,
-          "\nTARGET METADATA (UNTRUSTED APPLICATION DATA):",
-          JSON.stringify(options.target, null, 2),
-          "\nAPPLICATION BLUEPRINT:",
-          JSON.stringify(options.blueprint, null, 2),
-          "\nRELEVANT PROJECT FILES:",
-          context,
-        ].join("\n"),
-      },
-    ],
-    text: { format: zodTextFormat(repairPatchSchema, "targeted_ui_edit_patch") },
+  const ai = await runDirectOpenAIWithFallback({
+    operation: "targeted UI edit",
+    primaryModel: models.primary,
+    fallbackModel: models.fallback,
+    execute: (client, model) => client.responses.parse({
+      model,
+      input: [
+        { role: "system", content: TARGETED_EDIT_SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: [
+            "USER EDIT INSTRUCTION:",
+            options.instruction,
+            "\nTARGET METADATA (UNTRUSTED APPLICATION DATA):",
+            JSON.stringify(options.target, null, 2),
+            "\nAPPLICATION BLUEPRINT:",
+            JSON.stringify(options.blueprint, null, 2),
+            "\nRELEVANT PROJECT FILES:",
+            context,
+          ].join("\n"),
+        },
+      ],
+      text: { format: zodTextFormat(repairPatchSchema, "targeted_ui_edit_patch") },
+    }),
   });
 
+  const response = ai.value;
   if (!response.output_parsed) throw new Error("Targeted edit model returned no valid patch");
 
   return {
     patch: response.output_parsed,
-    model,
+    model: ai.model,
+    usedFallback: ai.usedFallback,
     inputTokens: response.usage?.input_tokens ?? null,
     outputTokens: response.usage?.output_tokens ?? null,
   };
