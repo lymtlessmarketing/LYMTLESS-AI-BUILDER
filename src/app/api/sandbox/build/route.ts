@@ -22,6 +22,17 @@ function trimLogs(value: string, max = MAX_LOG_CHARS) {
   return value.length > max ? value.slice(-max) : value;
 }
 
+function repairableValidationError(error: string) {
+  return NextResponse.json(
+    {
+      error,
+      code: "INVALID_GENERATED_APP",
+      logs: `Generated application validation failed before sandbox execution:\n${error}`,
+    },
+    { status: 422 },
+  );
+}
+
 export async function POST(request: Request) {
   const supabase = await createClient();
   let sandbox: Sandbox | null = null;
@@ -81,14 +92,14 @@ export async function POST(request: Request) {
     if (!files?.length) return NextResponse.json({ error: "Generated version contains no files", code: "EMPTY_VERSION" }, { status: 409 });
 
     const packageFile = files.find((file) => file.path === "package.json");
-    if (!packageFile) return NextResponse.json({ error: "Generated version is missing package.json", code: "INVALID_GENERATED_APP" }, { status: 422 });
+    if (!packageFile) return repairableValidationError("Generated version is missing package.json");
     try {
       const packageJson = JSON.parse(packageFile.content) as { scripts?: Record<string, unknown> };
       if (typeof packageJson.scripts?.build !== "string" || typeof packageJson.scripts?.dev !== "string") {
-        return NextResponse.json({ error: "Generated package.json must include build and dev scripts", code: "INVALID_GENERATED_APP" }, { status: 422 });
+        return repairableValidationError("Generated package.json must include build and dev scripts");
       }
     } catch {
-      return NextResponse.json({ error: "Generated package.json is invalid JSON", code: "INVALID_GENERATED_APP" }, { status: 422 });
+      return repairableValidationError("Generated package.json is invalid JSON");
     }
 
     const { data: buildRun, error: buildRunError } = await supabase
@@ -157,7 +168,7 @@ export async function POST(request: Request) {
     if (readiness.exitCode !== 0) return failBuild("Generated application built but its preview server did not start", previewLogs);
 
     const previewUrl = sandbox.domain(PREVIEW_PORT);
-    if (!previewUrl) return failBuild("Sandbox did not return a preview URL");
+    if (!previewUrl) return failBuild("Sandbox did not return a preview URL", "Sandbox domain lookup returned no URL.");
 
     const { error: deploymentError } = await supabase.from("deployments").insert({
       project_id: parsedProjectId,
